@@ -26,7 +26,7 @@ the command line via SwiftPM. Do not create `.xcodeproj` or `.xcworkspace` files
 - `Sources/NotesToWebKit` — all logic. No AppKit/SwiftUI imports. Testable.
   - `Store/` — snapshot and read `NoteStore.sqlite` (GRDB)
   - `Model/` — decoded note document types
-  - `Render/` — document → HTML
+  - `Render/` — document → HTML, and the exported stylesheet (`Stylesheet.swift`)
   - `Export/` — asset copying, poster frames, writing the output directory
 - `Sources/NotesToWeb` — SwiftUI app. Should stay thin; push logic down into the kit.
 - `Protos/` — protobuf schema; generated output is committed under

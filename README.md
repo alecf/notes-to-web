@@ -1,6 +1,10 @@
+<img src="docs/logo.svg" alt="" width="96" align="left" hspace="4" vspace="4">
+
 # notes-to-web
 
 Turn an Apple Notes note into a publishable webpage — videos and all.
+
+<br clear="left">
 
 Pick a note, click **Export**, get a directory of static files you can upload
 verbatim to Cloudflare Pages, Netlify, S3, or any static host.
@@ -97,11 +101,16 @@ something empty.
 ## Development
 
 ```sh
-make          # list targets
-swift test    # unit tests for the parser and renderer
-make app      # assemble the .app bundle
-make run      # build and launch
+make            # list targets
+swift test      # unit tests for the parser and renderer
+make app        # assemble the .app bundle
+make run        # build and launch
+make dist       # universal, zipped bundle (what releases ship)
 ```
+
+The app icon is generated from `docs/logo.svg` by `scripts/make-icon.sh`. The
+resulting `.icns` is committed, so you only need to run it if you change the
+logo (and you'll need `brew install librsvg`).
 
 Logic lives in `Sources/NotesToWebKit` with no UI dependencies, so the note
 parser and HTML renderer are testable without launching anything.
