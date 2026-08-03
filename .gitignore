@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 *.app/
+NotesToWeb-*.zip
 DerivedData/
 .DS_Store
 tmp/

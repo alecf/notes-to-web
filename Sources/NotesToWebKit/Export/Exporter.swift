@@ -114,7 +114,7 @@ public actor Exporter {
 
         progress(ExportProgress(completed: referenced.count, total: total, message: "Writing page"))
 
-        try Data(PackageResources.style_css).write(
+        try Data(Stylesheet.css.utf8).write(
             to: assetsDir.appending(path: "style.css", directoryHint: .notDirectory)
         )
 
@@ -238,7 +238,5 @@ public actor Exporter {
 
 extension HTMLRenderer {
     /// The stylesheet the exporter writes, for use in the in-app preview.
-    public static var bundledStylesheet: String {
-        String(decoding: PackageResources.style_css, as: UTF8.self)
-    }
+    public static var bundledStylesheet: String { Stylesheet.css }
 }

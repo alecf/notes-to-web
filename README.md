@@ -41,16 +41,30 @@ You grant Full Disk Access once, on first run. The app will walk you through it.
 
 ## Install
 
-Requires macOS 14+ and a Swift toolchain (`xcode-select --install` is enough).
+Requires macOS 14 or later.
+
+**Download** the latest `NotesToWeb-*.zip` from
+[Releases](https://github.com/alecf/notes-to-web/releases), unzip, and move the
+app to Applications. It is ad-hoc signed rather than notarized, so macOS will
+refuse to open it until you clear the quarantine flag:
+
+```sh
+xattr -d com.apple.quarantine /Applications/NotesToWeb.app
+```
+
+**Or build it**, which skips that step. A Swift toolchain is all you need —
+`xcode-select --install` is enough, and there is no Xcode project.
 
 ```sh
 git clone https://github.com/alecf/notes-to-web
 cd notes-to-web
-make app
+make app        # or: make install, to put it in /Applications
 open NotesToWeb.app
 ```
 
-`make install` copies it to `/Applications`.
+Release binaries are universal (arm64 + x86_64) and built by
+[GitHub Actions](.github/workflows/release.yml) on a clean runner, from a tag,
+with no developer machine involved. Each release lists the SHA-256 of its zip.
 
 ## Usage
 

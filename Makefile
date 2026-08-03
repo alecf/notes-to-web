@@ -1,7 +1,11 @@
 APP      := NotesToWeb
 BUNDLE   := $(APP).app
 CONFIG   := release
-BUILDDIR := .build/$(CONFIG)
+VERSION  := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
+
+# Set to "--arch arm64 --arch x86_64" for a universal build (what releases ship).
+ARCH_FLAGS ?=
+BINDIR    = $(shell swift build -c $(CONFIG) $(ARCH_FLAGS) --show-bin-path)
 
 .DEFAULT_GOAL := help
 
@@ -11,7 +15,11 @@ help:
 
 ## build: compile the library and executable
 build:
-	swift build -c $(CONFIG)
+	swift build -c $(CONFIG) $(ARCH_FLAGS)
+
+## version: print the version the app bundle will carry
+version:
+	@echo $(VERSION)
 
 ## test: run unit tests
 test:
@@ -21,7 +29,7 @@ test:
 app: build
 	@rm -rf $(BUNDLE)
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
-	@cp $(BUILDDIR)/$(APP) $(BUNDLE)/Contents/MacOS/$(APP)
+	@cp $(BINDIR)/$(APP) $(BUNDLE)/Contents/MacOS/$(APP)
 	@cp Resources/Info.plist $(BUNDLE)/Contents/Info.plist
 	@if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(BUNDLE)/Contents/Resources/; fi
 	@printf 'APPL????' > $(BUNDLE)/Contents/PkgInfo
@@ -30,7 +38,7 @@ app: build
 		--options runtime \
 		$(BUNDLE) 2>/dev/null || \
 	 codesign --force --sign - --entitlements Resources/$(APP).entitlements $(BUNDLE)
-	@echo "built $(BUNDLE)"
+	@echo "built $(BUNDLE) $(VERSION) ($$(lipo -archs $(BUNDLE)/Contents/MacOS/$(APP)))"
 
 ## run: build the app bundle and launch it
 run: app
@@ -60,8 +68,15 @@ proto:
 live:
 	NOTES_TO_WEB_LIVE=1 swift test
 
+## dist: build a universal, zipped app bundle for release
+dist:
+	@$(MAKE) app ARCH_FLAGS="--arch arm64 --arch x86_64"
+	@rm -f $(APP)-$(VERSION).zip
+	@ditto -c -k --sequesterRsrc --keepParent $(BUNDLE) $(APP)-$(VERSION).zip
+	@echo "$(APP)-$(VERSION).zip  $$(shasum -a 256 $(APP)-$(VERSION).zip | cut -d' ' -f1)"
+
 ## clean: remove build products
 clean:
-	@rm -rf .build $(BUNDLE)
+	@rm -rf .build $(BUNDLE) $(APP)-*.zip
 
-.PHONY: help build test app run install proto live clean
+.PHONY: help build version test app run install proto live dist clean

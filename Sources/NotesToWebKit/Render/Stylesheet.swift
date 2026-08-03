@@ -1,3 +1,13 @@
+import Foundation
+
+/// The stylesheet written to `assets/style.css` on export, and inlined into the
+/// in-app preview.
+///
+/// Kept as a Swift literal rather than a SwiftPM resource: `embedInCode` is not
+/// supported by the multi-arch build path used for universal release binaries,
+/// and a `.process` resource would need its bundle copied into the .app by hand.
+public enum Stylesheet {
+    public static let css = #"""
 :root {
   color-scheme: light dark;
   --ink: #16181d;
@@ -133,4 +143,6 @@ figure.attachment.placeholder span {
 
 @media (max-width: 34rem) {
   body { padding: 2.5rem 1.1rem 5rem; }
+}
+"""#
 }

@@ -55,6 +55,14 @@ columns we query. Resolve by globbing, and keep the existing fallbacks.
 database open. Always snapshot `NoteStore.sqlite` *and* its `-wal` and `-shm`
 sidecars together before opening, or you will read stale data.
 
+**Do not add SwiftPM resources to `NotesToWebKit`.** Release binaries are
+universal, and `swift build --arch arm64 --arch x86_64` routes through a
+different build system that does not generate `PackageResources`, so
+`.embedInCode` breaks the release build while `swift build` stays green. A
+`.process` resource would work but needs its bundle copied into the .app by
+hand. Assets belong in Swift literals — see `Render/Stylesheet.swift`. Verify
+any packaging change with `make dist`, not just `swift build`.
+
 **Full Disk Access is required** and is keyed to the signed binary. After a
 rebuild, macOS may treat the app as new — if the app suddenly reports no
 permission during development, toggle it off and on in System Settings.

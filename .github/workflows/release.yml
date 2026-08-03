@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          plist=$(make version)
+          # A tag that disagrees with the bundle version ships a mislabelled build.
+          if [ "$tag" != "v$plist" ]; then
+            echo "::error::tag $tag does not match Info.plist version $plist"
+            exit 1
+          fi
+          echo "tag=$tag"        >> "$GITHUB_OUTPUT"
+          echo "version=$plist"  >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: swift test
+
+      # Nothing from a developer machine is involved: the runner is fresh, the
+      # only inputs are this checkout and pinned SwiftPM dependencies.
+      - name: Build universal app bundle
+        run: make dist
+
+      - name: Verify the bundle
+        run: |
+          set -eux
+          app="NotesToWeb.app/Contents/MacOS/NotesToWeb"
+          lipo -archs "$app" | grep -q "x86_64"
+          lipo -archs "$app" | grep -q "arm64"
+          codesign --verify --deep --strict --verbose=2 NotesToWeb.app
+          test -f "NotesToWeb-${{ steps.version.outputs.version }}.zip"
+
+      - name: Write release notes
+        id: notes
+        run: |
+          zip="NotesToWeb-${{ steps.version.outputs.version }}.zip"
+          sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)
+          cat > notes.md <<EOF
+          Turn an Apple Notes note into a publishable webpage — videos and all.
+
+          ## Install
+
+          Download \`$zip\`, unzip it, and move **NotesToWeb.app** to Applications.
+
+          The app is ad-hoc signed, not notarized, so macOS will refuse to open it
+          on first launch. Clear the quarantine flag:
+
+          \`\`\`sh
+          xattr -d com.apple.quarantine /Applications/NotesToWeb.app
+          \`\`\`
+
+          Then grant **Full Disk Access** in System Settings → Privacy & Security.
+          The app explains why on first run: Notes' scripting interface silently
+          drops embedded videos, so notes-to-web reads Notes' own store instead —
+          read-only, from a temporary copy.
+
+          Or build it yourself, which avoids the quarantine step entirely:
+
+          \`\`\`sh
+          git clone https://github.com/${{ github.repository }}
+          cd notes-to-web && make app
+          \`\`\`
+
+          ## Verify
+
+          Universal binary (arm64 + x86_64), built by
+          [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          on a clean GitHub-hosted runner.
+
+          \`\`\`
+          SHA-256  $sha
+          \`\`\`
+          EOF
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "notes-to-web ${{ steps.version.outputs.version }}" \
+            --notes-file notes.md \
+            "NotesToWeb-${{ steps.version.outputs.version }}.zip"

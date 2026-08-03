@@ -18,8 +18,7 @@ let package = Package(
             dependencies: [
                 .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "GRDB", package: "GRDB.swift"),
-            ],
-            resources: [.embedInCode("Resources/style.css")]
+            ]
         ),
         .executableTarget(
             name: "NotesToWeb",
