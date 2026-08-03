@@ -1,0 +1,76 @@
+syntax = "proto2";
+
+// Schema for the gzipped protobuf stored in NoteStore.sqlite's ZICNOTEDATA.ZDATA.
+//
+// Field numbers here were verified empirically against a real Notes library on
+// macOS 26 (see docs/plans/2026-08-03-notes-to-web-design.md). Only the subset
+// needed to reconstruct a document is modelled; unknown fields are preserved by
+// the protobuf runtime and ignored.
+//
+// The reference documentation for this format is threeplanetssoftware's
+// apple_cloud_notes_parser.
+
+package notestore;
+
+option swift_prefix = "PB";
+
+message NoteStoreProto {
+  optional Document document = 2;
+}
+
+message Document {
+  optional int32 version = 2;
+  optional Note note = 3;
+}
+
+message Note {
+  // Attachments appear in this text as U+FFFC OBJECT REPLACEMENT CHARACTER.
+  optional string note_text = 2;
+  repeated AttributeRun attribute_run = 5;
+}
+
+message AttributeRun {
+  // Length in UTF-16 code units. Run lengths sum to note_text's UTF-16 length.
+  optional int32 length = 1;
+  optional ParagraphStyle paragraph_style = 2;
+  optional Font font = 3;
+  optional int32 font_weight = 5;
+  optional int32 underlined = 6;
+  optional int32 strikethrough = 7;
+  optional int32 superscript = 8;  // negative for subscript
+  optional string link = 9;
+  optional Color color = 10;
+  optional AttachmentInfo attachment_info = 12;
+}
+
+message ParagraphStyle {
+  optional int32 style_type = 1 [default = -1];
+  optional int32 alignment = 2;
+  optional int32 indent_amount = 4;
+  optional Checklist checklist = 5;
+  optional int32 block_quote = 8;
+}
+
+message Checklist {
+  optional bytes uuid = 1;
+  optional int32 done = 2;
+}
+
+message Font {
+  optional string font_name = 1;
+  optional float point_size = 2;
+  optional int32 font_hints = 3;
+}
+
+message Color {
+  optional float red = 1;
+  optional float green = 2;
+  optional float blue = 3;
+  optional float alpha = 4;
+}
+
+message AttachmentInfo {
+  // Matches ZICCLOUDSYNCINGOBJECT.ZIDENTIFIER for the attachment row.
+  optional string attachment_identifier = 1;
+  optional string type_uti = 2;
+}
