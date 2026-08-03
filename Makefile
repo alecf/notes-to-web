@@ -56,13 +56,12 @@ proto:
 		--proto_path=Protos Protos/NoteStore.proto
 	@echo "regenerated Sources/NotesToWebKit/Generated/NoteStore.pb.swift"
 
-## fixture: capture a note's decompressed protobuf as a test fixture (NOTE="title substring")
-fixture:
-	@test -n "$(NOTE)" || { echo 'usage: make fixture NOTE="title substring"'; exit 1; }
-	@python3 scripts/capture_fixture.py "$(NOTE)"
+## live: run the smoke tests against your real Notes library
+live:
+	NOTES_TO_WEB_LIVE=1 swift test
 
 ## clean: remove build products
 clean:
 	@rm -rf .build $(BUNDLE)
 
-.PHONY: help build test app run install proto fixture clean
+.PHONY: help build test app run install proto live clean

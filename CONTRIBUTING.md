@@ -11,18 +11,22 @@ swift test  # run tests
 make run    # build and launch the app
 ```
 
-## Testing against your own notes
+## Testing
 
-The parser and renderer are pure functions over a decoded note, so most work can
-be done with fixtures in `Tests/NotesToWebKitTests/Fixtures/`. To capture a new
-fixture from your own library:
+`swift test` runs the parser, renderer, and gzip tests. They build note documents
+programmatically rather than shipping real notes as fixtures, so they need no
+permissions and contain nobody's personal data.
+
+There is also a smoke suite that runs against your actual Notes library. It is
+skipped unless you ask for it:
 
 ```sh
-make fixture NOTE="part of the note title"
+make live   # NOTES_TO_WEB_LIVE=1 swift test
 ```
 
-This writes the decompressed protobuf for the matching note. **Read it before
-committing** — it contains that note's full text.
+It decodes every note you have and checks that attachments resolve. Run it after
+touching anything under `Store/` or `Model/`. Do not commit fixtures captured
+from a real library — they contain full note text.
 
 ## Regenerating protobuf code
 
