@@ -77,10 +77,21 @@ struct NoteList: View {
     @Bindable var library: LibraryModel
 
     var body: some View {
+        // A plain field rather than `.searchable`: in a three-column split view that
+        // modifier puts the field in the detail toolbar, far from the list it filters.
+        VStack(spacing: 0) {
+            SearchField(text: $library.searchText)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            Divider()
+            list
+        }
+    }
+
+    private var list: some View {
         List(library.notes, selection: $library.selectedNote) { note in
             NoteRow(note: note).tag(note)
         }
-        .searchable(text: $library.searchText, placement: .sidebar, prompt: "Search notes")
         .overlay {
             if library.notes.isEmpty {
                 ContentUnavailableView(
@@ -92,6 +103,32 @@ struct NoteList: View {
                 )
             }
         }
+    }
+}
+
+struct SearchField: View {
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.callout)
+            TextField("Search notes", text: $text)
+                .textFieldStyle(.plain)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear search")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 7))
     }
 }
 

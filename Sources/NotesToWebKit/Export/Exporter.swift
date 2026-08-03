@@ -1,5 +1,4 @@
 import AVFoundation
-import ImageIO
 import Foundation
 
 public enum ExportError: Error, LocalizedError {
@@ -175,7 +174,7 @@ public actor Exporter {
         if stored.kind == .video, options.generatePosterFrames {
             let posterName = uniqueName((baseName as NSString).deletingPathExtension + ".poster.jpg", in: &usedNames)
             let posterURL = assetsDir.appending(path: posterName, directoryHint: .notDirectory)
-            if await writePosterFrame(from: sourceURL, to: posterURL) {
+            if await PosterFrame.write(from: sourceURL, to: posterURL) {
                 posterPath = "assets/\(posterName)"
             } else {
                 usedNames.remove(posterName)
@@ -234,34 +233,6 @@ public actor Exporter {
             try? FileManager.default.removeItem(at: destination)
             return false
         }
-    }
-
-    private func writePosterFrame(from source: URL, to destination: URL) async -> Bool {
-        let asset = AVURLAsset(url: source)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 1600, height: 1600)
-        // A frame slightly into the clip avoids the black frame many recordings start on.
-        let time = CMTime(seconds: 0.5, preferredTimescale: 600)
-
-        do {
-            let (image, _) = try await generator.image(at: time)
-            guard let data = jpegData(from: image) else { return false }
-            try data.write(to: destination)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    private nonisolated func jpegData(from image: CGImage) -> Data? {
-        let output = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else {
-            return nil
-        }
-        CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return output as Data
     }
 }
 
