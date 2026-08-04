@@ -95,9 +95,31 @@ you get a hard failure instead of a graceful fall back.
 emits biplanar `420v`; Core Image has to convert to RGB and back even on the
 GPU, while `VTPixelTransferSession` works on those buffers natively.
 
-**Average bitrate is a target, not a ceiling.** On pathological content (pure
-noise) the encoder overshoots it substantially. Real footage does not, but a
-size budget is a strong expectation rather than a guarantee.
+**MP4 container overhead is per *frame*, not a percentage.** Sample tables cost
+a fixed ~21 bytes per frame regardless of how few bytes that frame's picture
+took, so at 240 fps and a budget-constrained bitrate the container is 2.6% of
+the file — eight times what the same clip costs at 30 fps. A flat percentage
+margin cannot model this and will silently blow the size budget on
+high-frame-rate footage. Measure frames, not ratios.
+
+**Average bitrate is a target, not a ceiling** — VideoToolbox overshoots
+`AVVideoAverageBitRateKey` by a couple of percent on real content, more on
+synthetic noise. `kVTCompressionPropertyKey_DataRateLimits` *is* reachable
+(unrecognised entries in `AVVideoCompressionPropertiesKey` are forwarded
+verbatim to `VTCompressionSessionSetProperty`) and does enforce, but it lands
+~30% under whatever cap it is given regardless of window length, so it wastes a
+third of the budget if used as the primary mechanism. It is used only on the
+rare corrective second pass, where certainty beats sharpness.
+
+**CI runners cannot hardware-encode video.** The encoding suites hang
+indefinitely there, not fail — a 40-minute stuck job with no output. They are
+gated on `VideoTranscoder.supportsHardwareEncoding` and carry a time limit so a
+pathological runner fails fast instead of stalling the build. Encoding changes
+must be verified locally; CI will not catch them.
+
+**`URL.resourceValues` caches per URL instance.** Re-reading a file's size
+through the same `URL` after rewriting it returns the *old* size, which makes
+verify-then-correct loops silently no-op. Use `FileManager.attributesOfItem`.
 
 **Full Disk Access is required** and is keyed to the signed binary. After a
 rebuild, macOS may treat the app as new — if the app suddenly reports no

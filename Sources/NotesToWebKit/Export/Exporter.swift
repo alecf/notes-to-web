@@ -218,7 +218,8 @@ public actor Exporter {
                 options: options,
                 progress: progress
             ) {
-            case .wrote(let codec):
+            case .wrote(let codec, let oversize):
+                if let oversize { warnings.append(oversize) }
                 mediaName = mp4Name
                 // Naming the codec lets a browser that cannot decode HEVC fall
                 // through to the download link instead of showing a dead player.
@@ -268,7 +269,10 @@ public actor Exporter {
     }
 
     private enum VideoOutcome {
-        case wrote(VideoCodec)
+        /// `oversize` is set when the clip could not be squeezed under the
+        /// budget. The video plays; it is just larger than the host will accept,
+        /// and the user should hear that now rather than at upload time.
+        case wrote(VideoCodec, oversize: String? = nil)
         case failed(String)
     }
 
@@ -300,10 +304,28 @@ public actor Exporter {
             let detail = "\(sizeLabel) → about \(targetLabel)"
 
             progress(0, "Compressing \(stored.displayName)", detail)
-            try await transcoder.transcode(source: sourceURL, to: destination, plan: plan) { fraction in
-                progress(fraction, "Compressing \(stored.displayName)", detail)
+            let ramp = CorrectivePassRamp()
+            let result = try await transcoder.transcode(
+                source: sourceURL, to: destination, plan: plan
+            ) { fraction in
+                let (mapped, isCorrecting) = ramp.map(fraction)
+                progress(
+                    mapped,
+                    "Compressing \(stored.displayName)",
+                    isCorrecting ? "\(detail) · adjusting to fit" : detail
+                )
             }
-            return .wrote(plan.codec)
+
+            guard result.exceedsBudget, let limit = plan.byteCeiling else {
+                return .wrote(plan.codec)
+            }
+            let actual = ByteCountFormatter.string(fromByteCount: result.byteCount, countStyle: .file)
+            let ceiling = ByteCountFormatter.string(fromByteCount: limit, countStyle: .file)
+            return .wrote(plan.codec, oversize: """
+                \(stored.displayName) came out at \(actual), over the \(ceiling) limit — it is too \
+                long to compress that far. Trim it, or choose a smaller quality, or publish \
+                somewhere without a per-file limit.
+                """)
         } catch is CancellationError {
             return .failed("\(stored.displayName) was cancelled.")
         } catch {
@@ -344,6 +366,32 @@ public actor Exporter {
         } catch {
             try? FileManager.default.removeItem(at: destination)
             return false
+        }
+    }
+}
+
+/// The transcoder runs a corrective second pass when the first overshoots the
+/// size budget, and that pass restarts its own progress at zero. Squash both
+/// passes into one ramp that never decreases, so the bar cannot jump backwards.
+/// The first pass gets most of the range because it is almost always the only one.
+private final class CorrectivePassRamp: @unchecked Sendable {
+    private static let firstPassShare = 0.85
+
+    private let lock = NSLock()
+    private var highest = 0.0
+    private var previousRaw = 0.0
+    private var isSecondPass = false
+
+    func map(_ raw: Double) -> (fraction: Double, isCorrecting: Bool) {
+        lock.withLock {
+            if raw < previousRaw { isSecondPass = true }
+            previousRaw = raw
+
+            let mapped = isSecondPass
+                ? Self.firstPassShare + raw * (1 - Self.firstPassShare)
+                : raw * Self.firstPassShare
+            highest = max(highest, min(mapped, 1))
+            return (highest, isSecondPass)
         }
     }
 }

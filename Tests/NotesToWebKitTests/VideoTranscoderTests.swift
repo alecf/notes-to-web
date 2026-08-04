@@ -6,7 +6,7 @@ import Testing
 
 /// Everything here runs against video synthesised on the fly — no Notes library,
 /// no personal media, nothing left behind in the temp directory.
-@Suite("Video transcoder")
+@Suite("Video transcoder", .enabled(if: VideoTranscoder.supportsHardwareEncoding, "no hardware video encoder on this machine"), .timeLimit(.minutes(5)))
 struct VideoTranscoderTests {
 
     // MARK: Planning
@@ -224,6 +224,133 @@ struct VideoTranscoderTests {
         #expect(!FileManager.default.fileExists(atPath: destination.path(percentEncoded: false)))
     }
 
+    // MARK: Budget accuracy
+
+    @Test("A high frame rate costs budget, because sample tables are per-frame")
+    func frameRateChangesTheBudget() async throws {
+        // Same pictures, same duration, same budget — only the frame count differs.
+        let slow = try await SyntheticVideo.write(width: 640, height: 480, seconds: 2, fps: 30)
+        let fast = try await SyntheticVideo.write(width: 640, height: 480, seconds: 2, fps: 240)
+        defer {
+            SyntheticVideo.remove(slow)
+            SyntheticVideo.remove(fast)
+        }
+
+        let transcoder = VideoTranscoder()
+        let settings = VideoEncodeSettings(quality: .high, codec: .h264, sizeBudget: 400_000)
+        let slowPlan = try await transcoder.plan(for: slow, settings: settings)
+        let fastPlan = try await transcoder.plan(for: fast, settings: settings)
+
+        // 240 fps carries eight times the sample-table weight, so less of the
+        // budget is left for pictures. A flat percentage margin cannot see this.
+        #expect(fastPlan.videoBitrate < slowPlan.videoBitrate)
+        #expect(fastPlan.estimatedByteCount <= 400_000)
+        #expect(slowPlan.estimatedByteCount <= 400_000)
+    }
+
+    @Test("A frame-dense clip on a tight budget really lands under it")
+    func denseClipRespectsBudget() async throws {
+        // The shape of the defect this test exists for: many frames, few bytes per
+        // frame, so container overhead is a large fraction of the file and the
+        // encoder's overshoot has nowhere to hide.
+        // 480 frames in 400 KB: the sample tables alone are ~2.5% of the file,
+        // the same proportion that pushed real 4K footage over its budget. Not so
+        // dense that bits-per-frame becomes the binding constraint, which is a
+        // different problem the budget cannot solve.
+        let source = try await SyntheticVideo.write(
+            width: 640, height: 480, seconds: 4, fps: 120, bitrate: 12_000_000, content: .blocks
+        )
+        let destination = SyntheticVideo.scratchURL()
+        defer {
+            SyntheticVideo.remove(source)
+            SyntheticVideo.remove(destination)
+        }
+
+        let budget: Int64 = 400_000
+        let transcoder = VideoTranscoder()
+        let plan = try await transcoder.plan(
+            for: source,
+            settings: VideoEncodeSettings(quality: .high, codec: .h264, sizeBudget: budget)
+        )
+        #expect(!plan.exceedsBudget)
+        #expect(plan.estimatedByteCount <= budget)
+
+        let result = try await transcoder.transcode(
+            source: source, to: destination, plan: plan
+        ) { _ in }
+
+        let actual = SyntheticVideo.byteCount(destination)
+        #expect(actual <= budget, "landed at \(actual) against a \(budget) budget")
+        #expect(!result.exceedsBudget)
+        #expect(result.byteCount == actual)
+        // Real footage fits on the first pass; this synthetic blocky content is
+        // harder to predict and sometimes needs the corrective one. Either is a
+        // pass — what matters is that it converges rather than shipping oversize.
+        #expect(result.passes <= 2)
+    }
+
+    @Test("An overshooting first pass is corrected, not shipped")
+    func overshootTriggersACorrectivePass() async throws {
+        let source = try await SyntheticVideo.write(
+            width: 640, height: 480, seconds: 2, bitrate: 12_000_000, content: .blocks
+        )
+        let destination = SyntheticVideo.scratchURL()
+        defer {
+            SyntheticVideo.remove(source)
+            SyntheticVideo.remove(destination)
+        }
+
+        // A deliberately dishonest plan: a bitrate that cannot possibly fit the
+        // ceiling it claims to respect. Nothing `plan(for:)` produces looks like
+        // this, which is exactly why the safety net needs its own test.
+        let ceiling: Int64 = 250_000
+        let plan = TranscodePlan(
+            outputWidth: 640, outputHeight: 480,
+            videoBitrate: 4_000_000, audioBitrate: 0, codec: .h264,
+            durationSeconds: 2, sourceByteCount: SyntheticVideo.byteCount(source),
+            estimatedByteCount: 1_000_000,
+            passesThrough: false, exceedsBudget: false,
+            byteCeiling: ceiling
+        )
+
+        let result = try await VideoTranscoder().transcode(
+            source: source, to: destination, plan: plan
+        ) { _ in }
+
+        let actual = SyntheticVideo.byteCount(destination)
+        #expect(actual <= ceiling, "landed at \(actual) against a \(ceiling) ceiling")
+        #expect(result.passes == 2)
+        #expect(!result.exceedsBudget)
+    }
+
+    @Test("A clip that cannot fit is reported, and not re-encoded pointlessly")
+    func hopelessClipIsNotRetried() async throws {
+        let source = try await SyntheticVideo.write(
+            width: 640, height: 480, seconds: 2, bitrate: 12_000_000
+        )
+        let destination = SyntheticVideo.scratchURL()
+        defer {
+            SyntheticVideo.remove(source)
+            SyntheticVideo.remove(destination)
+        }
+
+        let transcoder = VideoTranscoder()
+        let plan = try await transcoder.plan(
+            for: source,
+            settings: VideoEncodeSettings(quality: .small, codec: .h264, sizeBudget: 5_000)
+        )
+        #expect(plan.exceedsBudget)
+        #expect(plan.videoBitrate == 400_000)
+
+        // Reported, not thrown, and no corrective pass to chase an impossible target.
+        let result = try await transcoder.transcode(
+            source: source, to: destination, plan: plan
+        ) { _ in }
+        #expect(result.passes == 1)
+        #expect(result.exceedsBudget)
+        #expect(SyntheticVideo.byteCount(destination) > 0)
+    }
+
     @Test("A file with no video track fails with a message naming it")
     func missingVideoTrackIsActionable() async throws {
         let url = SyntheticVideo.scratchURL(extension: "mp4")
@@ -267,16 +394,36 @@ enum SyntheticVideo {
         (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
     }
 
-    /// One block of noise, reused by every frame: filling rows from a shifting
-    /// offset into it is memcpy-fast but still defeats both intra prediction and
-    /// motion estimation, so the encoder actually spends the bitrate it is asked
-    /// for. A solid colour would collapse to a few kilobytes and make the
-    /// "smaller output" assertions meaningless.
-    private static let noise: [UInt8] = {
-        var bytes = [UInt8](repeating: 0, count: 8_192)
-        bytes.withUnsafeMutableBytes { arc4random_buf($0.baseAddress, $0.count) }
-        return bytes
-    }()
+    /// What the frames look like. This matters more than it sounds: an encoder
+    /// asked for 500 kbps will only deliver it if the content can *be* compressed
+    /// that far, and the two cases below sit at opposite ends of that.
+    enum Content {
+        /// Per-pixel noise. Incompressible — the encoder blows past any low
+        /// bitrate target because max quantisation still cannot shrink it. Use it
+        /// to prove output is smaller than a fat source, never to test a budget.
+        case noise
+        /// 16-pixel blocks of flat colour, scrolling. Detailed enough that the
+        /// encoder spends its whole allowance, compressible enough that it can
+        /// actually hit a low target. This is the one budgets can be tested with.
+        case blocks
+    }
+
+    /// One block of randomness, reused by every frame: filling rows from a
+    /// shifting offset into it is memcpy-fast but still defeats intra prediction
+    /// and motion estimation. A solid colour would collapse to a few kilobytes
+    /// and make the "smaller output" assertions meaningless.
+    private static let noise: [UInt8] = randomBytes(runLength: 1)
+    /// The same idea at 1/16 the spatial frequency.
+    private static let blocks: [UInt8] = randomBytes(runLength: 16)
+
+    private static func randomBytes(runLength: Int) -> [UInt8] {
+        var seed = [UInt8](repeating: 0, count: 8_192 / runLength + 1)
+        seed.withUnsafeMutableBytes { arc4random_buf($0.baseAddress, $0.count) }
+        var out = [UInt8]()
+        out.reserveCapacity(8_192 + runLength)
+        for byte in seed { out.append(contentsOf: repeatElement(byte, count: runLength)) }
+        return out
+    }
 
     /// A clip whose luma is high-frequency and changes every frame.
     static func write(
@@ -285,7 +432,8 @@ enum SyntheticVideo {
         seconds: Double,
         fps: Int32 = 24,
         bitrate: Int = 10_000_000,
-        withAudio: Bool = false
+        withAudio: Bool = false,
+        content: Content = .noise
     ) async throws -> URL {
         let url = scratchURL()
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
@@ -335,7 +483,7 @@ enum SyntheticVideo {
             guard let pool = adaptor.pixelBufferPool else {
                 throw TestVideoError.setupFailed("no pixel buffer pool")
             }
-            let buffer = try makeFrame(pool: pool, frame: frame)
+            let buffer = try makeFrame(pool: pool, frame: frame, content: content)
             let time = CMTime(value: CMTimeValue(frame), timescale: fps)
             guard adaptor.append(buffer, withPresentationTime: time) else {
                 throw TestVideoError.setupFailed(writer.error?.localizedDescription ?? "frame rejected")
@@ -360,7 +508,11 @@ enum SyntheticVideo {
         return url
     }
 
-    private static func makeFrame(pool: CVPixelBufferPool, frame: Int) throws -> CVPixelBuffer {
+    private static func makeFrame(
+        pool: CVPixelBufferPool,
+        frame: Int,
+        content: Content
+    ) throws -> CVPixelBuffer {
         var pooled: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pooled) == kCVReturnSuccess,
               let buffer = pooled
@@ -372,8 +524,9 @@ enum SyntheticVideo {
         if let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) {
             let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
             let rows = CVPixelBufferGetHeightOfPlane(buffer, 0)
-            let columns = min(CVPixelBufferGetWidthOfPlane(buffer, 0), noise.count - 256)
-            noise.withUnsafeBytes { source in
+            let pattern = content == .noise ? noise : blocks
+            let columns = min(CVPixelBufferGetWidthOfPlane(buffer, 0), pattern.count - 256)
+            pattern.withUnsafeBytes { source in
                 guard let base = source.baseAddress else { return }
                 for row in 0..<rows {
                     let offset = (row &* 37 &+ frame &* 131) % 256

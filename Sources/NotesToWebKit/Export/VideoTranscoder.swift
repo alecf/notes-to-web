@@ -137,6 +137,21 @@ public struct TranscodePlan: Sendable, Hashable {
     public let passesThrough: Bool
     /// Even at the minimum sane bitrate the output will not fit `sizeBudget`.
     public let exceedsBudget: Bool
+    /// The ceiling this plan was built for, carried so `transcode` can check the
+    /// finished file against it rather than trusting the estimate. `nil` when the
+    /// settings imposed no budget.
+    public let byteCeiling: Int64?
+}
+
+/// What actually came out, as opposed to what the plan hoped for.
+public struct TranscodeResult: Sendable, Hashable {
+    public let byteCount: Int64
+    /// The file is over `TranscodePlan.byteCeiling` even after a corrective pass.
+    /// It plays fine; it is just larger than the host will accept. Callers should
+    /// say so rather than letting a doomed upload be discovered later.
+    public let exceedsBudget: Bool
+    /// 1 normally, 2 when the first attempt overshot and had to be redone.
+    public let passes: Int
 }
 
 // MARK: - Errors
@@ -172,9 +187,23 @@ public actor VideoTranscoder {
     /// size has stopped being the interesting problem.
     private static let minimumVideoBitrate = 400_000
 
-    /// Bitrate covers elementary stream bytes only; MP4 sample tables, atoms and
-    /// per-frame overhead are not free. Spend the budget at 97%.
-    private static let containerHeadroom = 0.97
+    /// MP4 sample tables cost a fixed handful of bytes for *every frame* —
+    /// offset, size, duration, composition offset — regardless of how few bytes
+    /// that frame's picture took. So container overhead scales with frame count,
+    /// not with file size, and no flat percentage can model it: a 120 s 240 fps
+    /// clip carries 28,805 frames and spends 0.58 MiB on tables alone, which at a
+    /// budget-constrained 1.5 Mbps is 2.6% of the file. Measured at 21.0
+    /// bytes/frame on our own encoder settings; 24 leaves room to be wrong.
+    private static let containerBytesPerVideoFrame = 24.0
+    private static let containerBytesPerAudioPacket = 10.0
+    /// Atoms that do not scale with anything. Measured at ~1.4 KiB; 16 KiB is
+    /// generous without eating a small clip's whole budget.
+    private static let containerFixedBytes = 16_384.0
+
+    /// `AVVideoAverageBitRateKey` is a target the encoder aims at, not a ceiling
+    /// it respects, and it runs over on sustained high-motion content. Measured
+    /// at +2.2% on 4K nature footage downscaled to 1080p; budget for 6%.
+    private static let encoderOvershoot = 1.06
 
     /// Downscaling stays inside VideoToolbox: it works natively on the biplanar
     /// YCbCr buffers the decoder hands us, so there is no YCbCr -> RGB -> YCbCr
@@ -211,8 +240,11 @@ public actor VideoTranscoder {
 
         let naturalSize: CGSize
         let formats: [CMFormatDescription]
+        let frameRate: Float
         do {
-            (naturalSize, formats) = try await videoTrack.load(.naturalSize, .formatDescriptions)
+            (naturalSize, formats, frameRate) = try await videoTrack.load(
+                .naturalSize, .formatDescriptions, .nominalFrameRate
+            )
         } catch {
             throw VideoTranscodeError.unreadable(source, reason: error.localizedDescription)
         }
@@ -236,11 +268,19 @@ public actor VideoTranscoder {
         let ceiling = Int((Double(settings.quality.videoBitrateCeiling) * settings.codec.bitrateFactor).rounded())
         let floor = Int((Double(Self.minimumVideoBitrate) * settings.codec.bitrateFactor).rounded())
 
+        let overhead = Self.containerOverhead(
+            seconds: seconds,
+            frameRate: frameRate,
+            hasAudio: hasAudio
+        )
+
         var videoBitrate = ceiling
         var exceedsBudget = false
         if let budget = settings.sizeBudget {
-            let payloadBits = Double(budget) * 8 * Self.containerHeadroom
-            let affordable = payloadBits / seconds - Double(audioBitrate)
+            // Only what is left after the container has taken its cut can be spent
+            // on pictures, and the encoder needs headroom on top of that.
+            let payloadBits = Double(max(0, budget - overhead)) * 8
+            let affordable = (payloadBits / seconds - Double(audioBitrate)) / Self.encoderOvershoot
             videoBitrate = min(ceiling, Int(affordable.rounded(.down)))
             if videoBitrate < floor {
                 // Still a valid plan — the caller warns rather than refusing to export.
@@ -249,7 +289,12 @@ public actor VideoTranscoder {
             }
         }
 
-        var estimated = Int64((Double(videoBitrate + audioBitrate) * seconds / 8).rounded())
+        var estimated = Self.estimatedSize(
+            videoBitrate: videoBitrate,
+            audioBitrate: audioBitrate,
+            seconds: seconds,
+            overhead: overhead
+        )
         if let budget = settings.sizeBudget, estimated > budget { exceedsBudget = true }
 
         let sourceBitrate = sourceBytes > 0 ? Double(sourceBytes) * 8 / seconds : .infinity
@@ -270,8 +315,39 @@ public actor VideoTranscoder {
             sourceByteCount: sourceBytes,
             estimatedByteCount: estimated,
             passesThrough: passesThrough,
-            exceedsBudget: exceedsBudget
+            exceedsBudget: exceedsBudget,
+            byteCeiling: settings.sizeBudget
         )
+    }
+
+    private static func frameRate(of source: URL) async -> Float {
+        guard let track = try? await AVURLAsset(url: source).loadTracks(withMediaType: .video).first,
+              let rate = try? await track.load(.nominalFrameRate), rate > 0
+        else { return 30 }
+        return rate
+    }
+
+    /// What the MP4 container itself will cost, before a single picture byte.
+    private static func containerOverhead(seconds: Double, frameRate: Float, hasAudio: Bool) -> Int64 {
+        let fps = frameRate > 0 ? Double(frameRate) : 30
+        let videoFrames = seconds * fps
+        // AAC packets are 1024 samples each at the 44.1 kHz we re-encode to.
+        let audioPackets = hasAudio ? seconds * 44_100 / 1_024 : 0
+        return Int64(
+            videoFrames * containerBytesPerVideoFrame
+                + audioPackets * containerBytesPerAudioPacket
+                + containerFixedBytes
+        )
+    }
+
+    private static func estimatedSize(
+        videoBitrate: Int,
+        audioBitrate: Int,
+        seconds: Double,
+        overhead: Int64
+    ) -> Int64 {
+        let payload = (Double(videoBitrate) * encoderOvershoot + Double(audioBitrate)) * seconds / 8
+        return Int64(payload.rounded()) + overhead
     }
 
     /// H.264 requires even dimensions, and odd ones make some encoders fail outright.
@@ -296,14 +372,92 @@ public actor VideoTranscoder {
 
     /// Writes an MP4 with the moov atom first (faststart), reporting 0...1.
     ///
+    /// When the plan carries a `byteCeiling`, the finished file is measured
+    /// against it and re-encoded once under a hard rate cap if it came out over.
+    /// That second pass restarts progress at 0 — it is rare, and reporting it is
+    /// better than a bar that sits at 1.0 for another minute.
+    ///
     /// Throws `CancellationError` if the surrounding task is cancelled; either way
     /// the partial file is deleted rather than left looking like a finished export.
+    ///
+    /// The return value is discardable, but callers that set a budget should check
+    /// `exceedsBudget` — some clips cannot be made to fit at any bitrate.
+    @discardableResult
     public func transcode(
         source: URL,
         to destination: URL,
         plan: TranscodePlan,
         progress: @Sendable (Double) -> Void
-    ) async throws {
+    ) async throws -> TranscodeResult {
+        let written = try await encode(
+            source: source, to: destination, plan: plan,
+            videoBitrate: plan.videoBitrate, hardCapBytesPerSecond: nil,
+            progress: progress
+        )
+
+        // A plan that already knows it cannot fit was clamped to the minimum
+        // bitrate; a second pass would only make it uglier, not smaller.
+        guard let ceiling = plan.byteCeiling, written > ceiling, !plan.exceedsBudget else {
+            progress(1.0)
+            return TranscodeResult(
+                byteCount: written,
+                exceedsBudget: plan.byteCeiling.map { written > $0 } ?? false,
+                passes: 1
+            )
+        }
+
+        // The estimate was wrong for this content, so stop estimating. Aim a hard
+        // `DataRateLimits` cap straight at the ceiling: `AVVideoAverageBitRateKey`
+        // is a target the encoder may miss, but `DataRateLimits` is enforced.
+        // Scaling the planned bitrate by how far it missed would be sharper, but
+        // it assumes the first pass hit its own target — and it demonstrably did
+        // not, which is why we are here.
+        //
+        // VideoToolbox enforces conservatively, landing around 30% under whatever
+        // cap it is given. That undershoot is quality we would rather have spent,
+        // but this pass only runs when the estimate has already failed once, and
+        // a file the host will accept beats a sharper one it will reject.
+        //
+        // The cap governs the elementary stream, so the container's cut has to
+        // come off the ceiling first, and 5% is held back because the cap is not
+        // quite absolute on very short clips.
+        let frameRate = await Self.frameRate(of: source)
+        let overhead = Self.containerOverhead(
+            seconds: plan.durationSeconds,
+            frameRate: frameRate,
+            hasAudio: plan.audioBitrate > 0
+        )
+        let payloadCeiling = Double(max(0, ceiling - overhead)) * 0.95
+        let floor = Int((Double(Self.minimumVideoBitrate) * plan.codec.bitrateFactor).rounded())
+        let capBitsPerSecond = max(
+            floor,
+            Int(payloadCeiling * 8 / plan.durationSeconds) - plan.audioBitrate
+        )
+        let corrected = try await encode(
+            source: source, to: destination, plan: plan,
+            videoBitrate: capBitsPerSecond, hardCapBytesPerSecond: capBitsPerSecond / 8,
+            progress: progress
+        )
+        progress(1.0)
+        // Frame-dense clips have a floor on bits *per frame* that no bitrate cap
+        // can push past — 240 fps slow motion on a small budget can simply be
+        // impossible. Say so instead of pretending.
+        return TranscodeResult(
+            byteCount: corrected,
+            exceedsBudget: corrected > ceiling,
+            passes: 2
+        )
+    }
+
+    /// One encode from start to finish. Returns the size of the file it wrote.
+    private func encode(
+        source: URL,
+        to destination: URL,
+        plan: TranscodePlan,
+        videoBitrate: Int,
+        hardCapBytesPerSecond: Int?,
+        progress: @Sendable (Double) -> Void
+    ) async throws -> Int64 {
         let asset = AVURLAsset(url: source)
 
         let videoTrack: AVAssetTrack?
@@ -365,7 +519,7 @@ public actor VideoTranscoder {
         reader.add(videoOutput)
 
         var compression: [String: Any] = [
-            AVVideoAverageBitRateKey: plan.videoBitrate,
+            AVVideoAverageBitRateKey: videoBitrate,
             AVVideoExpectedSourceFrameRateKey: Int(frameRate > 0 ? frameRate.rounded() : 30),
             // Two-second GOP: without it the encoder emits very few keyframes and
             // scrubbing the exported page becomes unusable.
@@ -374,6 +528,14 @@ public actor VideoTranscoder {
         ]
         if plan.codec == .h264 {
             compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+        }
+        if let cap = hardCapBytesPerSecond {
+            // [bytes, seconds]: no more than this many bytes in any window that
+            // long. AVFoundation forwards unrecognised compression properties
+            // straight to VTCompressionSessionSetProperty, which is how a raw
+            // VideoToolbox key reaches the encoder at all.
+            compression[kVTCompressionPropertyKey_DataRateLimits as String] =
+                [NSNumber(value: cap), NSNumber(value: 1.0)] as CFArray
         }
         var videoSettings: [String: Any] = [
             AVVideoCodecKey: plan.codec.avCodecType,
@@ -506,7 +668,12 @@ public actor VideoTranscoder {
                 reason: writer.error?.localizedDescription ?? "the encoder stopped early"
             )
         }
-        progress(1.0)
+        // Deliberately not `URL.resourceValues`: it caches per URL instance, so
+        // asking the same URL twice reports the first pass's size for the second.
+        let attributes = try? FileManager.default.attributesOfItem(
+            atPath: destination.path(percentEncoded: false)
+        )
+        return (attributes?[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     /// One interleaved loop over both tracks, so the output is laid out for
@@ -686,7 +853,13 @@ public actor VideoTranscoder {
         })
     }()
 
-    private static func hasHardwareEncoder(for codec: VideoCodec) -> Bool {
+    /// Whether this machine can hardware-encode at all. Virtualized CI runners
+    /// often cannot, and encoding through a software fallback is slow enough to
+    /// look like a hang, so the encoding tests skip themselves rather than
+    /// stalling the build.
+    public static var supportsHardwareEncoding: Bool { !hardwareEncoderCodecs.isEmpty }
+
+    static func hasHardwareEncoder(for codec: VideoCodec) -> Bool {
         switch codec {
         case .h264: hardwareEncoderCodecs.contains(kCMVideoCodecType_H264)
         case .hevc: hardwareEncoderCodecs.contains(kCMVideoCodecType_HEVC)
