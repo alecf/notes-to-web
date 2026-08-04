@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "NotesToWeb",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("26.0")],
     products: [
         .library(name: "NotesToWebKit", targets: ["NotesToWebKit"]),
         .executable(name: "NotesToWeb", targets: ["NotesToWeb"]),

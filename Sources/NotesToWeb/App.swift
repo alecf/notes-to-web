@@ -18,9 +18,15 @@ struct NotesToWebApp: App {
                 Button("Export Note…") { library.beginExport() }
                     .keyboardShortcut("e")
                     .disabled(library.selectedNote == nil)
+                Button("Publish Site") { library.publish() }
+                    .disabled(!library.canPublish)
                 Button("Refresh Notes") { library.reload() }
                     .keyboardShortcut("r")
             }
+        }
+
+        Settings {
+            SettingsView(library: library)
         }
     }
 }

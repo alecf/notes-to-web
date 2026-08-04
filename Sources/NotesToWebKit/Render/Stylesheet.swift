@@ -3,9 +3,9 @@ import Foundation
 /// The stylesheet written to `assets/style.css` on export, and inlined into the
 /// in-app preview.
 ///
-/// Kept as a Swift literal rather than a SwiftPM resource: `embedInCode` is not
-/// supported by the multi-arch build path used for universal release binaries,
-/// and a `.process` resource would need its bundle copied into the .app by hand.
+/// Kept as a Swift literal rather than a SwiftPM resource: a `.process` resource
+/// would need its bundle copied into the .app by hand, which `make app` does not
+/// do. See AGENTS.md.
 public enum Stylesheet {
     public static let css = #"""
 :root {
@@ -140,6 +140,40 @@ figure.attachment.placeholder span {
   color: var(--ink-soft);
   border-style: dashed;
 }
+
+/* Site index — the landing page listing every published note. */
+
+.index .entries {
+  list-style: none;
+  margin: 2.5rem 0 0;
+  padding: 0;
+}
+
+.index .entry {
+  padding: 1rem 0;
+  border-top: 1px solid var(--rule);
+}
+
+.index .entry:last-child { border-bottom: 1px solid var(--rule); }
+
+.index .entry a {
+  display: block;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.index .entry a:hover { color: var(--accent); }
+
+.index .entry .meta {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+}
+
+.index .empty { color: var(--ink-soft); }
 
 @media (max-width: 34rem) {
   body { padding: 2.5rem 1.1rem 5rem; }

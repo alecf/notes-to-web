@@ -9,6 +9,13 @@ A macOS app that exports a single Apple Notes note to a static website directory
 (`index.html` + `assets/`), preserving embedded videos as inline `<video>`
 elements.
 
+## Platform
+
+**macOS 26 or later, Apple Silicon only.** No backwards compatibility, no
+x86_64, no universal binaries. Write against the newest API spelling and do not
+add `#available` guards. Reach for Apple Silicon paths where they matter —
+notably GPU-backed `CIContext` and the hardware video encoders in the transcoder.
+
 ## Build and test
 
 ```sh
@@ -26,8 +33,13 @@ the command line via SwiftPM. Do not create `.xcodeproj` or `.xcworkspace` files
 - `Sources/NotesToWebKit` — all logic. No AppKit/SwiftUI imports. Testable.
   - `Store/` — snapshot and read `NoteStore.sqlite` (GRDB)
   - `Model/` — decoded note document types
-  - `Render/` — document → HTML, and the exported stylesheet (`Stylesheet.swift`)
-  - `Export/` — asset copying, poster frames, writing the output directory
+  - `Render/` — document → HTML, the site index page, and the exported
+    stylesheet (`Stylesheet.swift`)
+  - `Export/` — asset copying, video transcoding, poster frames, writing the
+    output directory
+  - `Publish/` — the site root (`SiteLibrary`), the provider-agnostic
+    `SitePublisher` protocol, Keychain credential storage, and per-provider
+    clients under `Publish/<Provider>/`
 - `Sources/NotesToWeb` — SwiftUI app. Should stay thin; push logic down into the kit.
 - `Protos/` — protobuf schema; generated output is committed under
   `Sources/NotesToWebKit/Generated/`.
@@ -55,13 +67,37 @@ columns we query. Resolve by globbing, and keep the existing fallbacks.
 database open. Always snapshot `NoteStore.sqlite` *and* its `-wal` and `-shm`
 sidecars together before opening, or you will read stale data.
 
-**Do not add SwiftPM resources to `NotesToWebKit`.** Release binaries are
-universal, and `swift build --arch arm64 --arch x86_64` routes through a
-different build system that does not generate `PackageResources`, so
-`.embedInCode` breaks the release build while `swift build` stays green. A
-`.process` resource would work but needs its bundle copied into the .app by
-hand. Assets belong in Swift literals — see `Render/Stylesheet.swift`. Verify
-any packaging change with `make dist`, not just `swift build`.
+**Be careful adding SwiftPM resources to `NotesToWebKit`.** Releases used to be
+universal, and `swift build --arch …` routes through a different build system
+that does not generate `PackageResources`, so `.embedInCode` broke `make dist`
+while `swift build` stayed green. Releases are now arm64-only and no longer pass
+`--arch`, so that specific trap is gone — but a `.process` resource still needs
+its bundle copied into the .app by hand, which `make app` does not do. Assets
+belong in Swift literals; see `Render/Stylesheet.swift`. Verify any packaging
+change with `make dist`, not just `swift build`.
+
+**`AVAssetWriter` stalls if you finish one track before starting the other.**
+Appending every video sample and only then the audio hangs indefinitely on
+anything longer than a second or two. Interleave: on each pass, append to
+whichever input reports `isReadyForMoreMediaData`. This cost a hung test run to
+find, and it will look like a deadlock, not a bug.
+
+**`writer.canApply(outputSettings:)` does not validate
+`AVVideoEncoderSpecificationKey`.** That dictionary really is forwarded to
+`VTCompressionSessionCreate` (verified empirically — a bogus `EncoderID` makes
+the writer fail with "Cannot Encode"), but a bad spec surfaces at
+`startWriting()`, not at `canApply`. VideoToolbox lists both hardware *and*
+software H.264/HEVC encoders, so requiring hardware is meaningful — but only ask
+for it after confirming `VTCopyVideoEncoderList` offers one for that codec, or
+you get a hard failure instead of a graceful fall back.
+
+**Scale video with `VTPixelTransferSession`, not `CIContext`.** The decoder
+emits biplanar `420v`; Core Image has to convert to RGB and back even on the
+GPU, while `VTPixelTransferSession` works on those buffers natively.
+
+**Average bitrate is a target, not a ceiling.** On pathological content (pure
+noise) the encoder overshoots it substantially. Real footage does not, but a
+size budget is a strong expectation rather than a guarantee.
 
 **Full Disk Access is required** and is keyed to the signed binary. After a
 rebuild, macOS may treat the app as new — if the app suddenly reports no
@@ -75,6 +111,14 @@ permission during development, toggle it off and on in System Settings.
   a base64 video is neither.
 - Do not commit fixtures captured from a real Notes library without reading them
   first — they contain full note text.
+- **Never embed a secret in the app.** It is open source and shipped as a
+  binary; a compiled-in token is a published token. Users create their own
+  credential and it goes in the Keychain — never `UserDefaults`, never a log
+  line, never an error message, never back onto the screen once stored.
+- **No new dependencies for video.** VideoToolbox has H.264 and HEVC encoders
+  and nothing else; that constraint is the reason the exporter offers no AV1 or
+  WebM, and it is a deliberate tradeoff, not an oversight. See
+  `docs/plans/2026-08-03-publishing-design.md`.
 
 ## Conventions
 

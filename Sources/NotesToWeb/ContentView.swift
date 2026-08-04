@@ -30,6 +30,8 @@ struct ContentView: View {
         .navigationTitle(library.selectedNote?.title ?? "Notes to Web")
         .sheet(isPresented: exportSheetBinding) {
             ExportSheet(library: library)
+                // Dismissing mid-encode would orphan a half-written directory.
+                .interactiveDismissDisabled(library.isBusy)
         }
     }
 

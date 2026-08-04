@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,15 +38,16 @@ jobs:
 
       # Nothing from a developer machine is involved: the runner is fresh, the
       # only inputs are this checkout and pinned SwiftPM dependencies.
-      - name: Build universal app bundle
+      - name: Build app bundle
         run: make dist
 
       - name: Verify the bundle
         run: |
           set -eux
           app="NotesToWeb.app/Contents/MacOS/NotesToWeb"
-          lipo -archs "$app" | grep -q "x86_64"
-          lipo -archs "$app" | grep -q "arm64"
+          # Apple Silicon only — an x86_64 slice here would mean the toolchain
+          # cross-built something we never test against.
+          test "$(lipo -archs "$app")" = "arm64"
           codesign --verify --deep --strict --verbose=2 NotesToWeb.app
           test -f "NotesToWeb-${{ steps.version.outputs.version }}.zip"
 
@@ -100,7 +101,7 @@ jobs:
 
           ## Verify
 
-          Universal binary (arm64 + x86_64), built by
+          Apple Silicon (arm64), macOS 26 or later. Built by
           [this workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           on a clean GitHub-hosted runner.
 

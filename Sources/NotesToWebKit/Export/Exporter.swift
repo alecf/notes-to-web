@@ -16,32 +16,69 @@ public enum ExportError: Error, LocalizedError {
 }
 
 public struct ExportOptions: Sendable {
-    /// Remux QuickTime movies to `.mp4` so they play outside Safari.
-    public var convertMoviesToMP4: Bool
+    /// What to do with video attachments on the way out.
+    public enum VideoTreatment: Sendable, Hashable {
+        /// Rewrap as `.mp4` without re-encoding. Preserves quality exactly and
+        /// is fast, but a phone's 50 Mbps clip stays a 50 Mbps clip.
+        case original
+        /// Re-encode for the web at a bounded bitrate and size.
+        case webOptimized(VideoEncodeSettings)
+    }
+
+    public var video: VideoTreatment
     /// Generate a still frame so videos do not appear as black rectangles.
     public var generatePosterFrames: Bool
+    /// Skip the empty-directory check. Set when the caller has already cleared
+    /// the destination, as re-exporting into a site root does.
+    public var overwriteDestination: Bool
 
-    public init(convertMoviesToMP4: Bool = true, generatePosterFrames: Bool = true) {
-        self.convertMoviesToMP4 = convertMoviesToMP4
+    public init(
+        video: VideoTreatment = .webOptimized(.webDefault),
+        generatePosterFrames: Bool = true,
+        overwriteDestination: Bool = false
+    ) {
+        self.video = video
         self.generatePosterFrames = generatePosterFrames
+        self.overwriteDestination = overwriteDestination
     }
 }
 
 public struct ExportProgress: Sendable {
-    public let completed: Int
-    public let total: Int
+    /// 0...1 across the whole export, weighted by source bytes so a 54 MB clip
+    /// does not advance the bar as fast as a 40 KB thumbnail.
+    public let fraction: Double
     public let message: String
-    public var fraction: Double { total > 0 ? Double(completed) / Double(total) : 0 }
+    public let detail: String?
+
+    public init(fraction: Double, message: String, detail: String? = nil) {
+        self.fraction = fraction
+        self.message = message
+        self.detail = detail
+    }
 }
 
 public struct ExportResult: Sendable {
     public let directory: URL
     public let indexPath: URL
     public let assetCount: Int
+    /// Bytes the attachments occupied in the Notes library.
+    public let sourceByteCount: Int64
+    /// Bytes actually written to the export directory.
+    public let exportedByteCount: Int64
+    /// The biggest single file written, which is what host per-file limits bite on.
+    public let largestFileByteCount: Int64
     public let warnings: [String]
+
+    /// Fraction of the original size saved, or nil when nothing was compressed.
+    public var savedFraction: Double? {
+        guard sourceByteCount > 0, exportedByteCount < sourceByteCount else { return nil }
+        return 1 - Double(exportedByteCount) / Double(sourceByteCount)
+    }
 }
 
 public actor Exporter {
+    private let transcoder = VideoTranscoder()
+
     public init() {}
 
     /// Write `document` to `destination` as `index.html` plus an `assets/` directory.
@@ -53,7 +90,8 @@ public actor Exporter {
     ) async throws -> ExportResult {
         let fm = FileManager.default
 
-        if let existing = try? fm.contentsOfDirectory(atPath: destination.path(percentEncoded: false)),
+        if !options.overwriteDestination,
+           let existing = try? fm.contentsOfDirectory(atPath: destination.path(percentEncoded: false)),
            !existing.filter({ !$0.hasPrefix(".") }).isEmpty {
             throw ExportError.destinationNotEmpty(destination)
         }
@@ -71,18 +109,21 @@ public actor Exporter {
             return nil
         }
 
+        // Weighting the bar by source bytes keeps it honest: video dominates the
+        // work, and one clip can be a thousand times the size of the next item.
+        let weights = referenced.map { Double(max(document.attachments[$0]?.fileSize ?? 0, 1)) }
+        let totalWeight = max(weights.reduce(0, +), 1)
+        var doneWeight = 0.0
+
         var assets: [String: RenderedAsset] = [:]
         var warnings: [String] = []
         var usedNames: Set<String> = ["style.css"]
-        let total = referenced.count + 1
+        var sourceBytes: Int64 = 0
 
         for (index, identifier) in referenced.enumerated() {
             guard let stored = document.attachments[identifier] else { continue }
-            progress(ExportProgress(
-                completed: index,
-                total: total,
-                message: "Copying \(stored.displayName)"
-            ))
+            let weight = weights[index]
+            let counter = "\(index + 1) of \(referenced.count)"
 
             guard let sourceURL = stored.fileURL else {
                 warnings.append("\(stored.displayName) is not downloaded to this Mac and was skipped. Open the note in Notes to download it.")
@@ -93,26 +134,40 @@ public actor Exporter {
                     displayName: stored.displayName,
                     byteCount: stored.fileSize
                 )
+                doneWeight += weight
                 continue
             }
 
+            sourceBytes += stored.fileSize
+            // Snapshot the running total: the callback is @Sendable and cannot
+            // capture the mutable accumulator.
+            let base = doneWeight
+
             do {
-                let asset = try await copy(
+                let asset = try await write(
                     stored,
                     from: sourceURL,
                     into: assetsDir,
                     options: options,
                     usedNames: &usedNames,
                     fallbackIndex: index,
-                    warnings: &warnings
+                    warnings: &warnings,
+                    progress: { unit, message, detail in
+                        progress(ExportProgress(
+                            fraction: min((base + unit * weight) / totalWeight, 0.99),
+                            message: message,
+                            detail: detail.map { "\(counter) · \($0)" } ?? counter
+                        ))
+                    }
                 )
                 assets[identifier] = asset
             } catch {
                 warnings.append("\(stored.displayName) could not be exported: \(error.localizedDescription)")
             }
+            doneWeight += weight
         }
 
-        progress(ExportProgress(completed: referenced.count, total: total, message: "Writing page"))
+        progress(ExportProgress(fraction: 0.99, message: "Writing page", detail: nil))
 
         try Data(Stylesheet.css.utf8).write(
             to: assetsDir.appending(path: "style.css", directoryHint: .notDirectory)
@@ -122,48 +177,65 @@ public actor Exporter {
         let indexPath = destination.appending(path: "index.html", directoryHint: .notDirectory)
         try Data(html.utf8).write(to: indexPath)
 
-        progress(ExportProgress(completed: total, total: total, message: "Done"))
+        progress(ExportProgress(fraction: 1, message: "Done", detail: nil))
 
+        let written = assets.values.compactMap(\.byteCount.self)
         return ExportResult(
             directory: destination,
             indexPath: indexPath,
             assetCount: assets.values.count(where: { $0.mediaPath != nil }),
+            sourceByteCount: sourceBytes,
+            exportedByteCount: SiteLibrary.byteCount(of: destination),
+            largestFileByteCount: written.max() ?? 0,
             warnings: warnings
         )
     }
 
     // MARK: Assets
 
-    private func copy(
+    private func write(
         _ stored: StoredAttachment,
         from sourceURL: URL,
         into assetsDir: URL,
         options: ExportOptions,
         usedNames: inout Set<String>,
         fallbackIndex: Int,
-        warnings: inout [String]
+        warnings: inout [String],
+        progress: @Sendable (Double, String, String?) -> Void
     ) async throws -> RenderedAsset {
         let baseName = uniqueName(stored.exportName(fallbackIndex: fallbackIndex), in: &usedNames)
         var mediaName = baseName
         var mimeType = stored.mimeType
 
-        if stored.kind == .video, options.convertMoviesToMP4, sourceURL.pathExtension.lowercased() != "mp4" {
+        if stored.kind == .video {
             let mp4Name = uniqueName((baseName as NSString).deletingPathExtension + ".mp4", in: &usedNames)
             let mp4URL = assetsDir.appending(path: mp4Name, directoryHint: .notDirectory)
-            if await remuxToMP4(from: sourceURL, to: mp4URL) {
+
+            switch await encodeVideo(
+                stored,
+                from: sourceURL,
+                to: mp4URL,
+                options: options,
+                progress: progress
+            ) {
+            case .wrote(let codec):
                 mediaName = mp4Name
-                mimeType = "video/mp4"
-            } else {
-                // Falling back to the original keeps the video playable in Safari
-                // even though other browsers may not accept a .mov container.
-                warnings.append("\(stored.displayName) could not be converted to MP4; the original QuickTime file was used.")
+                // Naming the codec lets a browser that cannot decode HEVC fall
+                // through to the download link instead of showing a dead player.
+                mimeType = codec == .hevc ? #"video/mp4; codecs="hvc1""# : "video/mp4"
+
+            case .failed(let reason):
+                warnings.append(reason)
                 usedNames.remove(mp4Name)
+                try? FileManager.default.removeItem(at: mp4URL)
+                progress(0.9, "Copying \(stored.displayName)", nil)
                 try FileManager.default.copyItem(
                     at: sourceURL,
                     to: assetsDir.appending(path: mediaName, directoryHint: .notDirectory)
                 )
             }
         } else {
+            progress(0, "Copying \(stored.displayName)", nil)
             try FileManager.default.copyItem(
                 at: sourceURL,
                 to: assetsDir.appending(path: mediaName, directoryHint: .notDirectory)
@@ -174,6 +246,8 @@ public actor Exporter {
         if stored.kind == .video, options.generatePosterFrames {
             let posterName = uniqueName((baseName as NSString).deletingPathExtension + ".poster.jpg", in: &usedNames)
             let posterURL = assetsDir.appending(path: posterName, directoryHint: .notDirectory)
+            // Taken from the source: better than a still off a compressed copy,
+            // and it still works when the transcode failed.
             if await PosterFrame.write(from: sourceURL, to: posterURL) {
                 posterPath = "assets/\(posterName)"
             } else {
@@ -191,6 +265,50 @@ public actor Exporter {
             displayName: stored.displayName,
             byteCount: size
         )
+    }
+
+    private enum VideoOutcome {
+        case wrote(VideoCodec)
+        case failed(String)
+    }
+
+    private func encodeVideo(
+        _ stored: StoredAttachment,
+        from sourceURL: URL,
+        to destination: URL,
+        options: ExportOptions,
+        progress: @Sendable (Double, String, String?) -> Void
+    ) async -> VideoOutcome {
+        guard case .webOptimized(let settings) = options.video else {
+            progress(0, "Converting \(stored.displayName)", nil)
+            return await remuxToMP4(from: sourceURL, to: destination)
+                ? .wrote(.h264)
+                : .failed("\(stored.displayName) could not be converted to MP4; export it as Original video or open it in Notes to check the file.")
+        }
+
+        do {
+            let plan = try await transcoder.plan(for: sourceURL, settings: settings)
+
+            if plan.passesThrough {
+                progress(0, "Copying \(stored.displayName)", "already web-sized")
+                if await remuxToMP4(from: sourceURL, to: destination) { return .wrote(plan.codec) }
+                // Fall through to a real encode rather than shipping a .mov.
+            }
+
+            let sizeLabel = ByteCountFormatter.string(fromByteCount: plan.sourceByteCount, countStyle: .file)
+            let targetLabel = ByteCountFormatter.string(fromByteCount: plan.estimatedByteCount, countStyle: .file)
+            let detail = "\(sizeLabel) → about \(targetLabel)"
+
+            progress(0, "Compressing \(stored.displayName)", detail)
+            try await transcoder.transcode(source: sourceURL, to: destination, plan: plan) { fraction in
+                progress(fraction, "Compressing \(stored.displayName)", detail)
+            }
+            return .wrote(plan.codec)
+        } catch is CancellationError {
+            return .failed("\(stored.displayName) was cancelled.")
+        } catch {
+            return .failed("\(stored.displayName) could not be compressed: \(error.localizedDescription)")
+        }
     }
 
     private func uniqueName(_ name: String, in used: inout Set<String>) -> String {
@@ -211,23 +329,17 @@ public actor Exporter {
         }
     }
 
-    /// Remux to MP4 without re-encoding where possible, using AVFoundation so the
-    /// app has no ffmpeg dependency.
+    /// Rewrap to MP4 without re-encoding, using AVFoundation so the app has no
+    /// ffmpeg dependency.
     private func remuxToMP4(from source: URL, to destination: URL) async -> Bool {
+        try? FileManager.default.removeItem(at: destination)
         let asset = AVURLAsset(url: source)
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough),
               session.supportedFileTypes.contains(.mp4)
         else { return false }
 
         do {
-            if #available(macOS 15.0, *) {
-                try await session.export(to: destination, as: .mp4)
-            } else {
-                session.outputURL = destination
-                session.outputFileType = .mp4
-                await session.export()
-                guard session.status == .completed else { return false }
-            }
+            try await session.export(to: destination, as: .mp4)
             return FileManager.default.fileExists(atPath: destination.path(percentEncoded: false))
         } catch {
             try? FileManager.default.removeItem(at: destination)

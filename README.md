@@ -7,7 +7,8 @@ Turn an Apple Notes note into a publishable webpage — videos and all.
 <br clear="left">
 
 Pick a note, click **Export**, get a directory of static files you can upload
-verbatim to Cloudflare Pages, Netlify, S3, or any static host.
+verbatim to Cloudflare, Netlify, S3, or any static host — or let the app publish
+it for you.
 
 ```
 my-workout/
@@ -22,6 +23,12 @@ my-workout/
 Videos embedded in the note stay embedded in the page — they play inline, in
 place, with a poster frame. No scrolling away, no new tabs, nothing inlined as
 base64.
+
+They are also compressed on the way out. Straight off an iPhone, one workout
+note came to 538 MB across 17 clips, with single files up to 54 MB — over
+Cloudflare's 25 MB per-file limit, and over half of GitHub Pages' 1 GB site
+limit. Re-encoding at a bounded bitrate is what makes that note publishable at
+all.
 
 ## Why this exists
 
@@ -45,7 +52,7 @@ You grant Full Disk Access once, on first run. The app will walk you through it.
 
 ## Install
 
-Requires macOS 14 or later.
+Requires macOS 26 or later on Apple Silicon.
 
 **Download** the latest `NotesToWeb-*.zip` from
 [Releases](https://github.com/alecf/notes-to-web/releases), unzip, and move the
@@ -66,7 +73,7 @@ make app        # or: make install, to put it in /Applications
 open NotesToWeb.app
 ```
 
-Release binaries are universal (arm64 + x86_64) and built by
+Release binaries are arm64 and built by
 [GitHub Actions](.github/workflows/release.yml) on a clean runner, from a tag,
 with no developer machine involved. Each release lists the SHA-256 of its zip.
 
@@ -75,12 +82,50 @@ with no developer machine involved. Each release lists the SHA-256 of its zip.
 1. Launch the app and grant Full Disk Access when prompted.
 2. Browse your accounts and folders in the sidebar; pick a note.
 3. The preview pane shows exactly what will be exported.
-4. **Export…** → choose a directory → done.
-5. Upload that directory. For Cloudflare Pages:
+4. **Export…** → check the size estimate → done.
+5. Upload the directory anywhere, or let the app publish it.
 
-   ```sh
-   npx wrangler pages deploy my-workout
-   ```
+## Publishing
+
+Set a **site folder** in Settings and every note you export lands in its own
+subfolder, so they publish together as one site:
+
+```
+alecs-notes/
+├── index.html          ← generated, lists every note
+├── workout-plan/
+└── knife-skills/
+```
+
+served as `/workout-plan/`, `/knife-skills/`, and so on. Re-exporting a note
+keeps its existing path, so links you've already shared don't break.
+
+Connect a Cloudflare account in Settings and the app uploads it for you.
+Unchanged files are skipped, so republishing one note out of twenty uploads only
+that note.
+
+You create the API token yourself and it is stored in the macOS Keychain —
+nothing is embedded in this app, and you can revoke it at any time. Or ignore
+publishing entirely and upload the folder however you like; the output is plain
+static files.
+
+Adding another host means writing one `SitePublisher` and registering it — see
+[the publishing design](docs/plans/2026-08-03-publishing-design.md).
+
+## Video
+
+Videos are re-encoded for the web by default, at a bitrate derived from a
+per-file size budget rather than a fixed quality preset. That is what keeps
+files under the 25 MB limit most free static hosts enforce.
+
+H.264 in MP4 is the default: hardware encoded, plays everywhere, with the moov
+atom moved to the front so playback starts before the download finishes. HEVC is
+available for roughly 40% smaller files where browser support allows. AV1 and
+WebM are not offered — VideoToolbox has no encoder for either, and bundling a
+software encoder would cost a large dependency and one to two orders of
+magnitude in speed.
+
+Turn compression off in Settings to keep the originals byte for byte.
 
 ## What gets preserved
 

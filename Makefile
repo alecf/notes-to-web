@@ -3,9 +3,10 @@ BUNDLE   := $(APP).app
 CONFIG   := release
 VERSION  := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
 
-# Set to "--arch arm64 --arch x86_64" for a universal build (what releases ship).
-ARCH_FLAGS ?=
-BINDIR    = $(shell swift build -c $(CONFIG) $(ARCH_FLAGS) --show-bin-path)
+# Apple Silicon only. Building for the host arch keeps SwiftPM on its normal
+# build system; passing --arch routes through a different one with its own
+# quirks (see AGENTS.md on package resources).
+BINDIR   := $(shell swift build -c $(CONFIG) --show-bin-path)
 
 .DEFAULT_GOAL := help
 
@@ -15,7 +16,7 @@ help:
 
 ## build: compile the library and executable
 build:
-	swift build -c $(CONFIG) $(ARCH_FLAGS)
+	swift build -c $(CONFIG)
 
 ## version: print the version the app bundle will carry
 version:
@@ -68,9 +69,8 @@ proto:
 live:
 	NOTES_TO_WEB_LIVE=1 swift test
 
-## dist: build a universal, zipped app bundle for release
-dist:
-	@$(MAKE) app ARCH_FLAGS="--arch arm64 --arch x86_64"
+## dist: build a zipped app bundle for release
+dist: app
 	@rm -f $(APP)-$(VERSION).zip
 	@ditto -c -k --sequesterRsrc --keepParent $(BUNDLE) $(APP)-$(VERSION).zip
 	@echo "$(APP)-$(VERSION).zip  $$(shasum -a 256 $(APP)-$(VERSION).zip | cut -d' ' -f1)"
