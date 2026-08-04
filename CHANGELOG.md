@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1
+
+- **Re-exporting a note no longer re-compresses its video.** Encodes are cached
+  by source file and encode settings, so publishing again after editing only the
+  text is effectively instant — measured at 0.52s → 0.003s. Changing quality,
+  codec, or the size budget still re-encodes, as it must.
+- The cache lives in `~/Library/Caches`, so macOS can reclaim it under disk
+  pressure and it is excluded from backups. Anything unused for 30 days is
+  removed on launch, and a Storage tab in Settings shows what is held and lets
+  you empty it.
+- Fixed: an `.mp4` attachment was exported as `clip-2.mp4`, because the exporter
+  reserved the source filename and then collided with itself asking for the
+  `.mp4` name.
+
 ## 0.3.0
 
 - **Publish straight to Cloudflare.** Paste an API token and the app uploads for

@@ -224,7 +224,7 @@ public actor SiteLibrary {
         Self.byteCount(of: root)
     }
 
-    nonisolated static func byteCount(of directory: URL) -> Int64 {
+    public nonisolated static func byteCount(of directory: URL) -> Int64 {
         guard let enumerator = FileManager.default.enumerator(
             at: directory,
             includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],

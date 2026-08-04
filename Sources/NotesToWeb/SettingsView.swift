@@ -13,6 +13,8 @@ struct SettingsView: View {
                 .tabItem { Label("Video", systemImage: "film") }
             PublishingSettings(library: library)
                 .tabItem { Label("Publishing", systemImage: "globe") }
+            StorageSettings(library: library)
+                .tabItem { Label("Storage", systemImage: "internaldrive") }
         }
         .frame(width: 560, height: 400)
     }
@@ -126,6 +128,64 @@ private struct NumberedStep: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
+    }
+}
+
+// MARK: - Storage
+
+private struct StorageSettings: View {
+    @Bindable var library: LibraryModel
+    @State private var refresh = 0
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Compressed video") {
+                    HStack {
+                        Text(size(library.cacheByteCount))
+                        Spacer()
+                        Button("Empty") { library.clearCache(); refresh += 1 }
+                            .disabled(library.cacheByteCount == 0)
+                    }
+                }
+            } footer: {
+                Text("""
+                    Re-exporting a note reuses these instead of compressing again, which is the \
+                    difference between a minute and an instant. Emptying this only costs time on \
+                    the next export. Anything unused for 30 days is removed automatically, and \
+                    macOS may reclaim it sooner if the disk fills.
+                    """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Section {
+                LabeledContent("Published sites") {
+                    HStack {
+                        Text(size(library.stagedByteCount))
+                        Spacer()
+                        Button("Remove") { library.clearStagedSites(); refresh += 1 }
+                            .disabled(library.stagedByteCount == 0)
+                    }
+                }
+            } footer: {
+                Text("""
+                    A copy of each site as published. Cloudflare replaces a site's whole contents \
+                    on every publish, so this is what keeps notes you published earlier from \
+                    disappearing when you publish another one. Removing it means re-exporting \
+                    those notes before the next publish.
+                    """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .id(refresh)
+    }
+
+    private func size(_ bytes: Int64) -> String {
+        bytes == 0 ? "Nothing stored" : ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

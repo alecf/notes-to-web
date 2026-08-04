@@ -78,8 +78,11 @@ public struct ExportResult: Sendable {
 
 public actor Exporter {
     private let transcoder = VideoTranscoder()
+    private let cache: TranscodeCache
 
-    public init() {}
+    public init(cache: TranscodeCache = TranscodeCache()) {
+        self.cache = cache
+    }
 
     /// Write `document` to `destination` as `index.html` plus an `assets/` directory.
     public func export(
@@ -203,12 +206,17 @@ public actor Exporter {
         warnings: inout [String],
         progress: @Sendable (Double, String, String?) -> Void
     ) async throws -> RenderedAsset {
-        let baseName = uniqueName(stored.exportName(fallbackIndex: fallbackIndex), in: &usedNames)
-        var mediaName = baseName
+        // Reserve only the name actually written. Claiming the source name first
+        // and then asking for the .mp4 name makes a `.mp4` source collide with
+        // itself, and `clip.mp4` comes out as `clip-2.mp4`.
+        let proposed = stored.exportName(fallbackIndex: fallbackIndex)
+        let stem = (proposed as NSString).deletingPathExtension
         var mimeType = stored.mimeType
+        var mediaName: String
 
         if stored.kind == .video {
-            let mp4Name = uniqueName((baseName as NSString).deletingPathExtension + ".mp4", in: &usedNames)
+            let mp4Name = uniqueName(stem + ".mp4", in: &usedNames)
+            mediaName = mp4Name
             let mp4URL = assetsDir.appending(path: mp4Name, directoryHint: .notDirectory)
 
             switch await encodeVideo(
@@ -229,6 +237,8 @@ public actor Exporter {
                 warnings.append(reason)
                 usedNames.remove(mp4Name)
                 try? FileManager.default.removeItem(at: mp4URL)
+                // Fall back to shipping the original container under its own name.
+                mediaName = uniqueName(proposed, in: &usedNames)
                 progress(0.9, "Copying \(stored.displayName)", nil)
                 try FileManager.default.copyItem(
                     at: sourceURL,
@@ -236,6 +246,7 @@ public actor Exporter {
                 )
             }
         } else {
+            mediaName = uniqueName(proposed, in: &usedNames)
             progress(0, "Copying \(stored.displayName)", nil)
             try FileManager.default.copyItem(
                 at: sourceURL,
@@ -245,11 +256,15 @@ public actor Exporter {
 
         var posterPath: String?
         if stored.kind == .video, options.generatePosterFrames {
-            let posterName = uniqueName((baseName as NSString).deletingPathExtension + ".poster.jpg", in: &usedNames)
+            let posterName = uniqueName(stem + ".poster.jpg", in: &usedNames)
             let posterURL = assetsDir.appending(path: posterName, directoryHint: .notDirectory)
             // Taken from the source: better than a still off a compressed copy,
             // and it still works when the transcode failed.
-            if await PosterFrame.write(from: sourceURL, to: posterURL) {
+            let posterKey = cache.key(for: sourceURL)
+            if let posterKey, cache.restore(key: posterKey, to: posterURL, extension: "jpg") {
+                posterPath = "assets/\(posterName)"
+            } else if await PosterFrame.write(from: sourceURL, to: posterURL) {
+                if let posterKey { cache.store(posterURL, key: posterKey, extension: "jpg") }
                 posterPath = "assets/\(posterName)"
             } else {
                 usedNames.remove(posterName)
@@ -293,9 +308,20 @@ public actor Exporter {
         do {
             let plan = try await transcoder.plan(for: sourceURL, settings: settings)
 
+            // Nothing about this file or these settings has changed since the
+            // last export, so the encode already done is still exactly right.
+            let key = cache.key(for: sourceURL, settings: settings)
+            if let key, cache.restore(key: key, to: destination) {
+                progress(1, "Reusing \(stored.displayName)", "already compressed")
+                return .wrote(plan.codec)
+            }
+
             if plan.passesThrough {
                 progress(0, "Copying \(stored.displayName)", "already web-sized")
-                if await remuxToMP4(from: sourceURL, to: destination) { return .wrote(plan.codec) }
+                if await remuxToMP4(from: sourceURL, to: destination) {
+                    if let key { cache.store(destination, key: key) }
+                    return .wrote(plan.codec)
+                }
                 // Fall through to a real encode rather than shipping a .mov.
             }
 
@@ -315,6 +341,8 @@ public actor Exporter {
                     isCorrecting ? "\(detail) · adjusting to fit" : detail
                 )
             }
+
+            if let key { cache.store(destination, key: key) }
 
             guard result.exceedsBudget, let limit = plan.byteCeiling else {
                 return .wrote(plan.codec)

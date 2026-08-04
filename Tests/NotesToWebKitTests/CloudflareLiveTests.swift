@@ -100,4 +100,33 @@ struct CloudflareLiveTests {
         print("live publish visible after \(elapsed)")
         #expect(served != nil, "\(target) never served the new content within 60s")
     }
+
+    @Test("Publishing the same site twice uploads nothing the second time")
+    func secondPublishUploadsNothing() async throws {
+        let account = try #require(
+            await CloudflarePublisher.discoverAccounts(apiToken: token).first
+        )
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "ntw-dedupe-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Big enough that re-uploading it would be obvious in the byte count.
+        try Data(repeating: 0x41, count: 2_000_000).write(to: root.appending(path: "big.bin"))
+        try Data("<!doctype html><title>dedupe</title>".utf8)
+            .write(to: root.appending(path: "index.html"))
+
+        let publisher = CloudflarePublisher(
+            apiToken: token, account: account, scriptName: "notes-to-web-test"
+        )
+        let first = try await publisher.publish(siteRoot: root)
+        let second = try await publisher.publish(siteRoot: root)
+
+        print("publish 1: \(first.uploadedFileCount) files / \(first.uploadedByteCount) bytes")
+        print("publish 2: \(second.uploadedFileCount) files / \(second.uploadedByteCount) bytes")
+        // Content addressing means an unchanged site costs a manifest and nothing else.
+        #expect(second.uploadedFileCount == 0, "re-uploaded \(second.uploadedFileCount) unchanged files")
+        #expect(second.uploadedByteCount == 0)
+        #expect(second.skippedFileCount == 2)
+    }
 }

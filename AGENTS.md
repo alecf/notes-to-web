@@ -121,9 +121,19 @@ them.** Run `swift test` locally before shipping any transcoder change, and
 `NOTES_TO_WEB_SCALE=1 NOTES_TO_WEB_SAMPLE=/path/to.mov swift test --filter Scale`
 against real footage — synthetic fixtures did not catch the size-budget bug.
 
+**Compressed video is cached; the staged sites are not a cache.**
+`~/Library/Caches/…/transcodes` holds encodes keyed by source identity *and*
+encode settings, so re-exporting an unchanged note is instant and changing any
+setting correctly re-encodes. It is safe to delete. The staged site copies under
+Application Support are **data**: a Workers deploy replaces a site's entire asset
+set, so those copies are what stop publishing one note from deleting its
+siblings. Do not "tidy" them into Caches.
+
 **`URL.resourceValues` caches per URL instance.** Re-reading a file's size
 through the same `URL` after rewriting it returns the *old* size, which makes
-verify-then-correct loops silently no-op. Use `FileManager.attributesOfItem`.
+verify-then-correct loops silently no-op. It bit the transcoder's corrective
+pass and then bit the cache key, where a rewritten file kept its old key and
+would have served a stale encode. Use `FileManager.attributesOfItem`.
 
 **Full Disk Access is required** and is keyed to the signed binary. After a
 rebuild, macOS may treat the app as new — if the app suddenly reports no

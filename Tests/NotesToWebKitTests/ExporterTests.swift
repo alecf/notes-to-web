@@ -290,3 +290,102 @@ struct ExporterScaleTests {
         #expect(result.largestFileByteCount <= VideoEncodeSettings.defaultSizeBudget)
     }
 }
+
+@Suite("Export caching", .enabled(if: VideoTranscoder.canRunEncodingTests), .timeLimit(.minutes(5)))
+struct ExportCachingTests {
+    /// The whole point: publishing twice with only the text changed must not
+    /// re-encode the video.
+    @Test("A second export with the same settings reuses the compressed video")
+    func secondExportIsNearlyFree() async throws {
+        let source = try await SyntheticVideo.write(
+            width: 1920, height: 1080, seconds: 6, bitrate: 20_000_000
+        )
+        defer { SyntheticVideo.remove(source) }
+
+        let scratch = FileManager.default.temporaryDirectory
+            .appending(path: "ntw-reexport-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let exporter = Exporter(cache: TranscodeCache(
+            directory: scratch.appending(path: "cache", directoryHint: .isDirectory)
+        ))
+        let attachment = StoredAttachment(
+            identifier: "v", typeUTI: "public.mpeg-4", filename: "clip.mp4",
+            title: nil, urlString: nil, fileURL: source,
+            fileSize: SyntheticVideo.byteCount(source)
+        )
+        let settings = VideoEncodeSettings(quality: .small, codec: .h264, sizeBudget: 2_000_000)
+
+        func export(title: String, into folder: String) async throws -> (ExportResult, Duration) {
+            let destination = scratch.appending(path: folder, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let started = ContinuousClock.now
+            let result = try await exporter.export(
+                document: NoteDocument(
+                    title: title,
+                    blocks: [.paragraph([Span(text: title)]), .attachment(identifier: "v")],
+                    attachments: ["v": attachment]
+                ),
+                to: destination,
+                options: ExportOptions(video: .webOptimized(settings), overwriteDestination: true)
+            )
+            return (result, started.duration(to: .now))
+        }
+
+        let (first, firstTime) = try await export(title: "Workout", into: "one")
+        // Same video, different text — exactly the republish case.
+        let (second, secondTime) = try await export(title: "Workout, revised", into: "two")
+
+        #expect(first.warnings.isEmpty && second.warnings.isEmpty)
+        // Byte-identical output proves it is the same encode, not a fresh one.
+        let a = try Data(contentsOf: first.directory.appending(path: "assets/clip.mp4"))
+        let b = try Data(contentsOf: second.directory.appending(path: "assets/clip.mp4"))
+        #expect(a == b, "cached encode differs from the original")
+
+        print("re-export: \(firstTime) -> \(secondTime)")
+        #expect(secondTime < firstTime / 3, "second export was \(secondTime) vs \(firstTime)")
+    }
+
+    @Test("Changing the settings does re-encode")
+    func changedSettingsReEncode() async throws {
+        let source = try await SyntheticVideo.write(width: 1280, height: 720, seconds: 3)
+        defer { SyntheticVideo.remove(source) }
+
+        let scratch = FileManager.default.temporaryDirectory
+            .appending(path: "ntw-resettings-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+
+        let exporter = Exporter(cache: TranscodeCache(
+            directory: scratch.appending(path: "cache", directoryHint: .isDirectory)
+        ))
+        let attachment = StoredAttachment(
+            identifier: "v", typeUTI: "public.mpeg-4", filename: "clip.mp4",
+            title: nil, urlString: nil, fileURL: source,
+            fileSize: SyntheticVideo.byteCount(source)
+        )
+        let document = NoteDocument(
+            title: "Workout", blocks: [.attachment(identifier: "v")], attachments: ["v": attachment]
+        )
+
+        func export(_ settings: VideoEncodeSettings, into folder: String) async throws -> Int64 {
+            let destination = scratch.appending(path: folder, directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            _ = try await exporter.export(
+                document: document, to: destination,
+                options: ExportOptions(video: .webOptimized(settings), overwriteDestination: true)
+            )
+            return Int64((try Data(contentsOf: destination.appending(path: "assets/clip.mp4"))).count)
+        }
+
+        let big = try await export(
+            VideoEncodeSettings(quality: .high, codec: .h264, sizeBudget: nil), into: "high"
+        )
+        let small = try await export(
+            VideoEncodeSettings(quality: .small, codec: .h264, sizeBudget: 300_000), into: "small"
+        )
+        // A stale cache hit would have produced the same bytes twice.
+        #expect(small < big, "tightening the budget did not re-encode: \(small) vs \(big)")
+    }
+}

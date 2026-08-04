@@ -81,6 +81,34 @@ final class LibraryModel {
         self.preferences = preferences
         reload()
         loadStoredCredential()
+        // Reclaim stale encodes in the background so a user who exported twice
+        // and stopped is not left with gigabytes forever.
+        Task.detached(priority: .utility) { TranscodeCache().prune() }
+    }
+
+    // MARK: Storage
+
+    /// Reusable compressed video. Safe to delete; costs time, not correctness.
+    var cacheByteCount: Int64 { TranscodeCache().contents().byteCount }
+
+    /// Staged copies of published sites. Deleting these means the next publish
+    /// of one note drops its siblings from the live site until they are
+    /// re-exported, so this is data rather than cache.
+    var stagedByteCount: Int64 {
+        SiteLibrary.byteCount(of: AppStorageLocation.support.appending(
+            path: "sites", directoryHint: .isDirectory
+        ))
+    }
+
+    func clearCache() {
+        TranscodeCache().removeAll()
+    }
+
+    func clearStagedSites() {
+        try? FileManager.default.removeItem(
+            at: AppStorageLocation.support.appending(path: "sites", directoryHint: .isDirectory)
+        )
+        sites = []
     }
 
     /// Notes' own identifier for the selection, scoped by account so a row ID
