@@ -55,8 +55,25 @@ jobs:
         run: |
           zip="NotesToWeb-${{ steps.version.outputs.version }}.zip"
           sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)
+
+          # Pull this version's section out of CHANGELOG.md. Deliberately
+          # fail-safe: a missing or unparseable section just omits the section
+          # rather than failing the release.
+          changes=""
+          if [ -f CHANGELOG.md ]; then
+            changes=$(awk -v v="## ${{ steps.version.outputs.version }}" \
+              '$0 == v {f=1; next} f && /^## / {exit} f' CHANGELOG.md || true)
+          fi
+
           cat > notes.md <<EOF
           Turn an Apple Notes note into a publishable webpage — videos and all.
+          EOF
+
+          if [ -n "$(printf '%s' "$changes" | tr -d '[:space:]')" ]; then
+            printf '\n## What changed\n%s\n' "$changes" >> notes.md
+          fi
+
+          cat >> notes.md <<EOF
 
           ## Install
 
