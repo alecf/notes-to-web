@@ -6,3 +6,7 @@ NotesToWeb-*.zip
 DerivedData/
 .DS_Store
 tmp/
+
+# Never commit secrets
+.env
+.env.*

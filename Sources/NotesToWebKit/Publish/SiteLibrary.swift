@@ -64,16 +64,42 @@ public enum SiteLibraryError: Error, LocalizedError {
     }
 }
 
-/// A folder holding every note published to one domain. Each note lives in its
-/// own subdirectory, so a note published as `workout-1` is served at
-/// `<site>/workout-1/`. Publishing uploads the whole folder; the site root is
-/// the source of truth, not the remote host.
-public actor SiteLibrary {
-    /// Sidecar recording what has been published. Dot-prefixed so it is skipped
-    /// when the tree is walked for upload.
-    private static let metadataFilename = ".notes-to-web.json"
+/// Reading and writing the sidecar that records what a site contains.
+enum SiteMetadataFile {
+    /// Dot-prefixed so it is skipped when the tree is walked for upload.
+    static let filename = ".notes-to-web.json"
 
-    public let root: URL
+    static func url(in root: URL) -> URL {
+        root.appending(path: filename, directoryHint: .notDirectory)
+    }
+
+    static func read(at root: URL) throws -> SiteMetadata {
+        guard let data = try? Data(contentsOf: url(in: root)) else {
+            return SiteMetadata(siteTitle: root.lastPathComponent)
+        }
+        do {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(SiteMetadata.self, from: data)
+        } catch {
+            throw SiteLibraryError.metadataUnreadable(url(in: root), error.localizedDescription)
+        }
+    }
+
+    static func write(_ metadata: SiteMetadata, at root: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(metadata).write(to: url(in: root))
+    }
+}
+
+/// One site: a folder holding every note published to one host. Each note lives
+/// in its own subdirectory, so a note published as `workout-1` is served at
+/// `<site>/workout-1/`. Publishing uploads the whole folder; this folder is the
+/// source of truth, not the remote host.
+public actor SiteLibrary {
+    public nonisolated let root: URL
 
     public init(root: URL) {
         self.root = root
@@ -82,26 +108,11 @@ public actor SiteLibrary {
     // MARK: Metadata
 
     public func metadata() throws -> SiteMetadata {
-        let url = root.appending(path: Self.metadataFilename, directoryHint: .notDirectory)
-        guard let data = try? Data(contentsOf: url) else {
-            return SiteMetadata(siteTitle: root.lastPathComponent)
-        }
-        do {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            return try decoder.decode(SiteMetadata.self, from: data)
-        } catch {
-            throw SiteLibraryError.metadataUnreadable(url, error.localizedDescription)
-        }
+        try SiteMetadataFile.read(at: root)
     }
 
     private func write(_ metadata: SiteMetadata) throws {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(metadata).write(
-            to: root.appending(path: Self.metadataFilename, directoryHint: .notDirectory)
-        )
+        try SiteMetadataFile.write(metadata, at: root)
     }
 
     public func setSiteTitle(_ title: String) throws {

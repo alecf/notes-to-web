@@ -5,7 +5,8 @@ import Testing
 // MARK: Routing stub
 
 /// Replies based on method and path, and keeps every request for inspection.
-private actor RoutingTransport {
+/// Shared with `CloudflareDiscoveryTests`.
+actor RoutingTransport {
     typealias Route = @Sendable (URLRequest) -> (Int, String)?
 
     private let routes: [Route]
@@ -45,7 +46,7 @@ private actor RoutingTransport {
     var paths: [String] { requests.map { "\($0.method) \($0.url.path)" } }
 }
 
-private func route(_ method: String, _ fragment: String, _ body: String, status: Int = 200) -> RoutingTransport.Route {
+func route(_ method: String, _ fragment: String, _ body: String, status: Int = 200) -> RoutingTransport.Route {
     { request in
         guard request.httpMethod == method, request.url!.absoluteString.contains(fragment) else { return nil }
         return (status, body)

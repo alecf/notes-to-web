@@ -11,19 +11,23 @@ struct ProviderDescriptor: Identifiable, Sendable {
     let id: String
     let displayName: String
     let capabilities: ProviderCapabilities
-    /// Extra non-secret fields this provider needs, rendered as text fields.
-    let settings: [SettingField]
-    /// Builds a publisher from stored preferences plus the secret from the
-    /// Keychain. Returns nil when something required is still blank.
-    let makePublisher: @Sendable @MainActor (Preferences, String) -> (any SitePublisher)?
+    /// Confirms a token and reports which account it can publish to. Empty means
+    /// the token is fine but cannot enumerate accounts, which is a different
+    /// problem from a bad token and gets a different message.
+    let discoverAccounts: @Sendable (String) async throws -> [DiscoveredAccount]
+    /// Sites that already exist on the connected account.
+    let listSites: @Sendable (String, String) async throws -> [String]
+    /// The host sites are served from, for showing a real URL before publishing.
+    let accountHost: @Sendable (String, String) async throws -> String?
+    /// nil when the name is usable, otherwise the provider's own rule.
+    let validateSiteName: @Sendable (String) -> String?
+    /// Builds a publisher for one site. Returns nil when setup is incomplete.
+    let makePublisher: @Sendable (_ token: String, _ accountID: String, _ site: String)
+        -> (any SitePublisher)?
 
-    struct SettingField: Identifiable, Sendable {
+    struct DiscoveredAccount: Identifiable, Hashable, Sendable {
         let id: String
-        let label: String
-        let prompt: String
-        let help: String
-        let value: @Sendable @MainActor (Preferences) -> String
-        let setValue: @Sendable @MainActor (Preferences, String) -> Void
+        let name: String
     }
 }
 
@@ -39,29 +43,22 @@ enum ProviderRegistry {
         id: CloudflarePublisher.providerID,
         displayName: CloudflarePublisher.displayName,
         capabilities: CloudflarePublisher.capabilities,
-        settings: [
-            .init(
-                id: "accountID",
-                label: "Account ID",
-                prompt: "32-character hex string",
-                help: "Cloudflare dashboard → Workers & Pages → Overview, in the right-hand sidebar.",
-                value: { $0.cloudflareAccountID },
-                setValue: { $0.cloudflareAccountID = $1 }
-            ),
-            .init(
-                id: "projectName",
-                label: "Site name",
-                prompt: "alecs-notes",
-                help: "Becomes the subdomain your notes are served from.",
-                value: { $0.cloudflareProjectName },
-                setValue: { $0.cloudflareProjectName = $1 }
-            ),
-        ],
-        makePublisher: { preferences, token in
-            let account = preferences.cloudflareAccountID.trimmingCharacters(in: .whitespaces)
-            let project = preferences.cloudflareProjectName.trimmingCharacters(in: .whitespaces)
-            guard !account.isEmpty, !project.isEmpty, !token.isEmpty else { return nil }
-            return CloudflarePublisher(apiToken: token, accountID: account, scriptName: project)
+        discoverAccounts: { token in
+            try await CloudflarePublisher.discoverAccounts(apiToken: token)
+                .map { .init(id: $0.id, name: $0.name) }
+        },
+        listSites: { token, accountID in
+            try await CloudflarePublisher.listSites(apiToken: token, accountID: accountID)
+                .filter(\.servesAssets)
+                .map(\.name)
+        },
+        accountHost: { token, accountID in
+            try await CloudflarePublisher.accountSubdomain(apiToken: token, accountID: accountID)
+        },
+        validateSiteName: { CloudflarePublisher.validateSiteName($0) },
+        makePublisher: { token, accountID, site in
+            guard !token.isEmpty, !accountID.isEmpty, !site.isEmpty else { return nil }
+            return CloudflarePublisher(apiToken: token, accountID: accountID, scriptName: site)
         }
     )
 }

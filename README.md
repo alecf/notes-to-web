@@ -87,27 +87,30 @@ with no developer machine involved. Each release lists the SHA-256 of its zip.
 
 ## Publishing
 
-Set a **site folder** in Settings and every note you export lands in its own
-subfolder, so they publish together as one site:
+Each note remembers where it was published. Pick a destination the first time;
+after that, re-publishing an updated note is **Export → Return**.
+
+Two destinations, configured once in Settings:
+
+- **A folder on this Mac** — writes `index.html` and `assets/` wherever you
+  choose. Upload it however you like.
+- **Cloudflare** — paste an API token and the app publishes for you.
+
+For Cloudflare, a note goes to a *site* at a *path*, so several notes can share
+one address:
 
 ```
-alecs-notes/
-├── index.html          ← generated, lists every note
-├── workout-plan/
-└── knife-skills/
+alecs-notes.<your-subdomain>.workers.dev/workout-plan/
+                                        /knife-skills/
 ```
 
-served as `/workout-plan/`, `/knife-skills/`, and so on. Re-exporting a note
-keeps its existing path, so links you've already shared don't break.
+Re-exporting a note keeps its path, so links you have already shared do not
+break. Unchanged files are skipped by content hash, so republishing one note out
+of twenty uploads only that note.
 
-Connect a Cloudflare account in Settings and the app uploads it for you.
-Unchanged files are skipped, so republishing one note out of twenty uploads only
-that note.
-
-You create the API token yourself and it is stored in the macOS Keychain —
-nothing is embedded in this app, and you can revoke it at any time. Or ignore
-publishing entirely and upload the folder however you like; the output is plain
-static files.
+You create the API token yourself — **Account → Workers Scripts → Edit** is the
+only permission needed — and it is stored in the macOS Keychain. Nothing is
+embedded in this app, and you can revoke the token at any time.
 
 Adding another host means writing one `SitePublisher` and registering it — see
 [the publishing design](docs/plans/2026-08-03-publishing-design.md).

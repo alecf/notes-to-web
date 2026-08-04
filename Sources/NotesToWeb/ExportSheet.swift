@@ -42,20 +42,38 @@ private struct OptionsView: View {
                 .font(.title3.weight(.semibold))
 
             Form {
-                Section("Destination") {
-                    Picker("Put it", selection: $library.destination) {
-                        if let root = preferences.siteRoot {
-                            Text("In my site — \(root.lastPathComponent)/\(slug)/")
-                                .tag(LibraryModel.Destination.site)
+                Section("Publish to") {
+                    Picker("Destination", selection: $library.target.kind) {
+                        ForEach(library.availableDestinations) { kind in
+                            Text(kind.displayName).tag(kind)
                         }
-                        Text("In a folder I choose…").tag(LibraryModel.Destination.folder)
                     }
                     .pickerStyle(.radioGroup)
 
-                    if preferences.siteRoot == nil {
-                        Text("Set a site folder in Settings to keep every note together under one domain.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    switch library.target.kind {
+                    case .disk:
+                        LabeledContent("Folder") {
+                            HStack {
+                                Text(library.target.folderURL?.path(percentEncoded: false) ?? "Not chosen")
+                                    .foregroundStyle(library.target.folderURL == nil ? .secondary : .primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.head)
+                                Spacer()
+                                Button("Choose…") { library.chooseFolder() }
+                            }
+                        }
+                    case .cloudflare:
+                        SitePicker(library: library)
+                        TextField("Path", text: Binding(
+                            get: { library.target.path ?? library.notePath },
+                            set: { library.target.path = $0 }
+                        ))
+                        if let site = library.target.site, !site.isEmpty {
+                            Text("\(site).\(library.preferences.workersSubdomain)/\(library.notePath)/")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
                     }
                 }
 
@@ -104,12 +122,50 @@ private struct OptionsView: View {
                 Button("Export") { library.confirmExport() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
+                    .disabled(!library.isTargetComplete)
             }
         }
     }
 
-    private var slug: String {
-        (library.selectedNote?.title ?? "note").slugified
+}
+
+/// Existing sites plus a way to name a new one. Sites come from the connected
+/// account and from anything already staged locally.
+private struct SitePicker: View {
+    @Bindable var library: LibraryModel
+    @State private var isCreating = false
+    @State private var newName = ""
+
+    var body: some View {
+        if isCreating || library.sites.isEmpty {
+            HStack {
+                TextField("Site name", text: $newName, prompt: Text("alecs-notes"))
+                    .onSubmit(create)
+                Button("Create", action: create)
+                    .disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                if !library.sites.isEmpty {
+                    Button("Cancel") { isCreating = false }
+                }
+            }
+        } else {
+            HStack {
+                Picker("Site", selection: Binding(
+                    get: { library.target.site ?? library.sites.first ?? "" },
+                    set: { library.target.site = $0 }
+                )) {
+                    ForEach(library.sites, id: \.self) { Text($0).tag($0) }
+                }
+                Button("New…") { newName = ""; isCreating = true }
+                if library.isLoadingSites { ProgressView().controlSize(.small) }
+            }
+        }
+    }
+
+    private func create() {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        library.createSite(named: trimmed)
+        isCreating = false
     }
 }
 
@@ -271,6 +327,12 @@ private struct PublishedView: View {
             Text("Published").font(.title3.weight(.semibold))
             Link(url.absoluteString, destination: url)
                 .font(.callout)
+            // A brand-new workers.dev hostname takes up to a minute to reach
+            // every edge location. Without this, a first publish reads as broken.
+            Text("A brand-new address can take a minute to work everywhere. If it 404s, wait and reload.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
             HStack(spacing: 12) {
                 Button("Copy Link") {
                     NSPasteboard.general.clearContents()

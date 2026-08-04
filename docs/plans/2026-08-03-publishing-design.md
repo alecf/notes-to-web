@@ -195,6 +195,42 @@ For Cloudflare, in the dashboard:
 The app validates the token before storing it, so a typo fails at "Save & Test"
 rather than partway through a 50 MB upload.
 
+### Discovering the account instead of asking for it
+
+Three inputs — account ID, site name, token — is two too many. The site name is
+the app's to propose, and the account ID should be discovered from the token.
+`CloudflarePublisher.discoverAccounts` does that, but it cannot be relied on:
+
+**Cloudflare does not document which permission `GET /client/v4/accounts`
+requires**, and no page in the API reference or the permissions reference states
+it. The evidence says a token holding only *Account → Workers Scripts → Edit*
+will not be able to enumerate accounts:
+
+- Cloudflare's own *Edit Cloudflare Workers* token template bundles *Account
+  Settings: Read*, *User Details: Read* and *User Memberships: Read* next to the
+  Workers permission — which it would not need to do if Workers alone sufficed.
+- Wrangler discovers the account through `GET /memberships`, and a workers-sdk
+  maintainer says that call needs *All users → Memberships: Read*, "which is not
+  added to the normal Workers Edit API token template" (workers-sdk#1873).
+  Narrow tokens get 403 code 9109 there (workers-sdk#1422).
+- The documented advice to set `CLOUDFLARE_ACCOUNT_ID` exists precisely to skip
+  a discovery step that often cannot run.
+
+None of this was reproducible without a live narrow token, so nothing is
+assumed. Discovery tries `/accounts`, then `/memberships`, and **returns an
+empty list rather than an error when both refuse**. Empty means "ask the user
+for an ID", and the token-creation instructions name *User → Memberships → Read*
+as an optional extra that removes the question. A refusal here is never reported
+as a bad token: `/user/tokens/verify` runs first, and only that endpoint's
+failure means the credential is at fault.
+
+Site listing is the easy half: `GET /accounts/{id}/workers/scripts` returns
+`has_assets` per script, documented as "Whether a Worker contains assets", so
+the app can tell its own sites from the user's unrelated Workers without a
+second request per script. When the field is missing the site is treated as not
+asset-serving, which is the safe direction: it is never claimed that a code
+Worker is one of ours and therefore safe to overwrite.
+
 ## Non-goals for now
 
 - **R2 for oversized files.** Worth doing when a clip is genuinely too long to

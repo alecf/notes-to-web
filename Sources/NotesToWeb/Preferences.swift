@@ -18,8 +18,10 @@ final class Preferences {
         _enforceSizeBudget = defaults.object(forKey: Key.enforceSizeBudget) as? Bool ?? true
         _siteRootPath = defaults.string(forKey: Key.siteRootPath)
         _providerID = defaults.string(forKey: Key.providerID)
-        _cloudflareAccountID = defaults.string(forKey: Key.cloudflareAccountID) ?? ""
-        _cloudflareProjectName = defaults.string(forKey: Key.cloudflareProjectName) ?? ""
+        _accountID = defaults.string(forKey: Key.accountID) ?? ""
+        _accountName = defaults.string(forKey: Key.accountName) ?? ""
+        _lastSite = defaults.string(forKey: Key.lastSite)
+        _workersSubdomain = defaults.string(forKey: Key.workersSubdomain) ?? ""
     }
 
     private enum Key {
@@ -27,10 +29,14 @@ final class Preferences {
         static let quality = "video.quality"
         static let codec = "video.codec"
         static let enforceSizeBudget = "video.enforceSizeBudget"
-        static let siteRootPath = "site.rootPath"
+        static let siteRootPath = "export.defaultFolder"
         static let providerID = "publish.providerID"
-        static let cloudflareAccountID = "publish.cloudflare.accountID"
-        static let cloudflareProjectName = "publish.cloudflare.projectName"
+        // Discovered from the token rather than typed, but still worth remembering
+        // so the app does not re-interrogate Cloudflare on every launch.
+        static let accountID = "publish.accountID"
+        static let accountName = "publish.accountName"
+        static let lastSite = "publish.lastSite"
+        static let workersSubdomain = "publish.workersSubdomain"
     }
 
     // MARK: Video
@@ -61,10 +67,11 @@ final class Preferences {
         set { _enforceSizeBudget = newValue; defaults.set(newValue, forKey: Key.enforceSizeBudget) }
     }
 
-    // MARK: Site
+    // MARK: Sites
 
+    /// The folder holding every site, one subfolder each.
     private var _siteRootPath: String?
-    var siteRoot: URL? {
+    var defaultExportFolder: URL? {
         get { _siteRootPath.map { URL(filePath: $0, directoryHint: .isDirectory) } }
         set {
             _siteRootPath = newValue?.path(percentEncoded: false)
@@ -80,15 +87,35 @@ final class Preferences {
         set { _providerID = newValue; defaults.set(newValue, forKey: Key.providerID) }
     }
 
-    private var _cloudflareAccountID: String
-    var cloudflareAccountID: String {
-        get { _cloudflareAccountID }
-        set { _cloudflareAccountID = newValue; defaults.set(newValue, forKey: Key.cloudflareAccountID) }
+    private var _accountID: String
+    var accountID: String {
+        get { _accountID }
+        set { _accountID = newValue; defaults.set(newValue, forKey: Key.accountID) }
     }
 
-    private var _cloudflareProjectName: String
-    var cloudflareProjectName: String {
-        get { _cloudflareProjectName }
-        set { _cloudflareProjectName = newValue; defaults.set(newValue, forKey: Key.cloudflareProjectName) }
+    private var _accountName: String
+    var accountName: String {
+        get { _accountName }
+        set { _accountName = newValue; defaults.set(newValue, forKey: Key.accountName) }
     }
+
+    /// The site the last export went to, so the picker defaults somewhere sensible.
+    private var _lastSite: String?
+    var lastSite: String? {
+        get { _lastSite }
+        set { _lastSite = newValue; defaults.set(newValue, forKey: Key.lastSite) }
+    }
+
+    /// The account's workers.dev subdomain, so the export sheet can show the
+    /// real address before publishing rather than a placeholder.
+    private var _workersSubdomain: String
+    var workersSubdomain: String {
+        get { _workersSubdomain.isEmpty ? "workers.dev" : "\(_workersSubdomain).workers.dev" }
+        set {
+            _workersSubdomain = newValue
+            defaults.set(newValue, forKey: Key.workersSubdomain)
+        }
+    }
+
+    var isConnected: Bool { !accountID.isEmpty }
 }

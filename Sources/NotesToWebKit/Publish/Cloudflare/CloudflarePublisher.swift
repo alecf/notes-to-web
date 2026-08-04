@@ -21,12 +21,16 @@ public struct CloudflarePublisher: SitePublisher {
         supportsSubpaths: true,
         credentialLabel: "API token",
         credentialHelp: """
-        In the Cloudflare dashboard open My Profile → API Tokens → Create Token → Create \
-        Custom Token. Add one permission — Account → Workers Scripts → Edit — and scope it to \
-        the account you want to publish to. Copy the token when it is shown; Cloudflare will \
-        not show it again. NotesToWeb keeps it in your login keychain and sends it only to \
-        api.cloudflare.com. Nothing is embedded in the app.
+        The token is kept in your login keychain and sent only to api.cloudflare.com. \
+        Nothing is embedded in this app, and you can revoke it from the same page at any time.
         """,
+        credentialSteps: [
+            "Open the Cloudflare dashboard and sign in. A free account is enough.",
+            "Click **Create a token** below, then choose **Create Custom Token**.",
+            "Give it any name, and add one permission: **Account** → **Workers Scripts** → **Edit**.",
+            "Under **Account Resources**, pick the account you want to publish to.",
+            "Continue to summary, create the token, and copy it. Cloudflare shows it once and never again.",
+        ],
         credentialURL: URL(string: "https://dash.cloudflare.com/profile/api-tokens")
     )
 
@@ -58,6 +62,24 @@ public struct CloudflarePublisher: SitePublisher {
         )
     }
 
+    /// The form to use after `discoverAccounts` has answered, so the caller never has to
+    /// unwrap an account back into a string.
+    public init(
+        apiToken: String,
+        account: CloudflareAccount,
+        scriptName: String,
+        pathPrefix: String = "/",
+        compatibilityDate: String = "2025-01-01"
+    ) {
+        self.init(
+            api: CloudflareAPI(token: apiToken),
+            accountID: account.id,
+            scriptName: scriptName,
+            pathPrefix: pathPrefix,
+            compatibilityDate: compatibilityDate
+        )
+    }
+
     /// Injection point for tests and for callers that need a custom transport.
     public init(
         api: CloudflareAPI,
@@ -76,33 +98,23 @@ public struct CloudflarePublisher: SitePublisher {
     // MARK: Credentials
 
     public func validateCredentials() async throws -> String {
-        let verification = try CloudflareAPI.require(
-            await api.get("/user/tokens/verify", as: TokenVerification.self),
-            "token status"
-        )
-        guard verification.status == "active" else {
-            throw PublishError.credentialRejected(
-                "That API token is \(verification.status). Create a new one in the Cloudflare dashboard."
-            )
-        }
-
         guard !accountID.isEmpty else {
             throw PublishError.accountNotFound("(none given)")
         }
 
-        // Listing accounts needs Account Settings: Read, which the token does not have to
-        // carry. Falling back to the bare ID beats refusing a token that can publish fine.
-        do {
-            let accounts = try await api.get("/accounts?per_page=50", as: [AccountSummary].self) ?? []
-            if let match = accounts.first(where: { $0.id == accountID }) {
-                return "\(match.name) (\(match.id))"
-            }
-            if !accounts.isEmpty {
-                throw PublishError.accountNotFound(accountID)
-            }
-        } catch let error as CloudflareAPIError {
-            if case .unauthorized = error {} else { throw error }
+        // Enumeration first: an account-scoped token 401s on /user/tokens/verify
+        // even though it works, so verifying up front rejects good tokens.
+        let accounts = try await Self.enumerateAccounts(api: api)
+        if let match = accounts.first(where: { $0.id == accountID }) {
+            return match.label
         }
+        if !accounts.isEmpty {
+            throw PublishError.accountNotFound(accountID)
+        }
+
+        // Could not enumerate. Only now is it worth asking whether the token is
+        // broken; if it is not, publishing to the given ID may still work fine.
+        try await Self.verifiedToken(api: api)
         return "Cloudflare account \(accountID)"
     }
 
@@ -329,14 +341,8 @@ public struct CloudflarePublisher: SitePublisher {
     // MARK: Helpers
 
     func validateScriptName() throws {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        guard !scriptName.isEmpty,
-              scriptName.count <= 63,
-              scriptName.unicodeScalars.allSatisfy({ allowed.contains($0) }),
-              let first = scriptName.first, first != "-",
-              scriptName.last != "-"
-        else {
-            throw PublishError.invalidSiteName(scriptName)
+        if let reason = Self.validateSiteName(scriptName) {
+            throw PublishError.invalidSiteName(name: scriptName, reason: reason)
         }
     }
 

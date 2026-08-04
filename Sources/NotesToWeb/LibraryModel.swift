@@ -13,13 +13,6 @@ final class LibraryModel {
         case failed(String)
     }
 
-    /// Where an export lands. `site` keeps every note under one folder so they
-    /// publish as sibling paths on one domain; `folder` is the one-off case.
-    enum Destination: Hashable {
-        case folder
-        case site
-    }
-
     enum ExportState: Equatable {
         case idle
         /// Sheet is open, showing options and a size estimate.
@@ -64,7 +57,8 @@ final class LibraryModel {
     var searchText = "" { didSet { reloadNotes() } }
 
     var exportState: ExportState = .idle
-    var destination: Destination = .site
+    /// Where the selected note will go, pre-filled from where it went last time.
+    var target = NoteTarget()
     private(set) var estimate: ExportEstimate?
     private(set) var isEstimating = false
 
@@ -81,12 +75,24 @@ final class LibraryModel {
     private var work: Task<Void, Never>?
     private var storedCredential: String?
     private var lastSummary: ExportSummary?
+    private let targets = NoteTargetStore()
 
     init(preferences: Preferences = Preferences()) {
         self.preferences = preferences
-        if preferences.siteRoot == nil { destination = .folder }
         reload()
         loadStoredCredential()
+    }
+
+    /// Notes' own identifier for the selection, scoped by account so a row ID
+    /// from one account cannot collide with another's.
+    var selectedNoteID: String? {
+        selectedNote.map { "\($0.accountIdentifier)/\($0.id)" }
+    }
+
+    /// The path segment this note publishes under.
+    var notePath: String {
+        let candidate = target.path?.trimmingCharacters(in: .whitespaces) ?? ""
+        return candidate.isEmpty ? (selectedNote?.title.slugified ?? "note") : candidate
     }
 
     // MARK: Loading
@@ -164,9 +170,27 @@ final class LibraryModel {
     /// Opens the options sheet and starts costing the export in the background.
     func beginExport() {
         guard document != nil else { return }
-        if preferences.siteRoot == nil { destination = .folder }
+        // Everything about where this note goes is remembered, so the common
+        // case is Export → Return.
+        target = selectedNoteID.flatMap { targets[$0] } ?? NoteTarget(
+            kind: preferences.isConnected ? .cloudflare : .disk,
+            folderPath: preferences.defaultExportFolder?.path(percentEncoded: false)
+        )
         exportState = .configuring
         refreshEstimate()
+        refreshSites()
+    }
+
+    var availableDestinations: [DestinationKind] {
+        DestinationKind.allCases.filter { $0 != .cloudflare || preferences.isConnected }
+    }
+
+    /// Whether the Export button can do anything yet.
+    var isTargetComplete: Bool {
+        switch target.kind {
+        case .disk: target.folderURL != nil
+        case .cloudflare: !(target.site ?? "").isEmpty
+        }
     }
 
     /// Per-file ceiling for this export, taken from whichever provider is
@@ -266,57 +290,80 @@ final class LibraryModel {
 
     /// Commits the export the sheet is configured for.
     func confirmExport() {
-        guard let document, let note = selectedNote else { return }
+        guard let document, let note = selectedNote, let noteID = selectedNoteID else { return }
         work?.cancel()
 
-        switch destination {
-        case .folder:
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-            panel.canCreateDirectories = true
-            panel.prompt = "Export Here"
-            panel.message = "Choose an empty folder for the exported website."
-            panel.nameFieldStringValue = note.title.slugified
+        switch target.kind {
+        case .disk:
+            guard let folder = target.folderURL else { chooseFolder(); return }
+            var options = exportOptions
+            options.overwriteDestination = true
+            target.folderPath = folder.path(percentEncoded: false)
+            targets[noteID] = target
+            preferences.defaultExportFolder = folder.deletingLastPathComponent()
 
-            guard panel.runModal() == .OK, let url = panel.url else { return }
             exportState = .running(fraction: 0, message: "Preparing", detail: nil)
             work = Task {
-                await run(document, to: url, options: exportOptions, slug: nil, site: nil)
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                await run(document, to: folder, options: options, slug: nil, site: nil)
             }
 
-        case .site:
-            guard let root = preferences.siteRoot else {
-                exportState = .failed("No site folder is set. Choose one in Settings, or export to a folder instead.")
+        case .cloudflare:
+            let site = (target.site ?? "").trimmingCharacters(in: .whitespaces)
+            guard !site.isEmpty else { return }
+            if let reason = DestinationKind.cloudflare.provider?.validateSiteName(site) {
+                exportState = .failed("“\(site)” will not work as a site name. \(reason)")
                 return
             }
+            let path = notePath
+            target.site = site
+            target.path = path
+            targets[noteID] = target
+            preferences.lastSite = site
+
             var options = exportOptions
             options.overwriteDestination = true
 
-            let library = SiteLibrary(root: root)
+            // Staged locally because a Workers deploy replaces the whole asset
+            // set: siblings already published to this site must be uploaded
+            // alongside this note or they would vanish.
+            let library = SiteLibrary(root: AppStorageLocation.stagedSite(site))
             let title = note.title
-            // Scoped by account so a row ID from one account can't collide with
-            // another's, and so the slug survives re-reading the store.
-            let identifier = "\(note.accountIdentifier)/\(note.id)"
 
             exportState = .running(fraction: 0, message: "Preparing", detail: nil)
             work = Task {
                 do {
                     try await library.prepare()
-                    let slug = try await library.slug(forTitle: title, noteIdentifier: identifier)
-                    try await library.clearDirectory(for: slug)
+                    try await library.clearDirectory(for: path)
                     await run(
                         document,
-                        to: library.directory(for: slug),
+                        to: library.directory(for: path),
                         options: options,
-                        slug: slug,
-                        site: (library, title, identifier)
+                        slug: path,
+                        site: (library, title, noteID)
                     )
                 } catch {
                     exportState = .failed(error.localizedDescription)
                 }
             }
         }
+    }
+
+    /// Asks for the folder this note should be written to.
+    func chooseFolder() {
+        guard let note = selectedNote else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Export Here"
+        panel.message = "Choose a folder for this note's website."
+        panel.directoryURL = target.folderURL?.deletingLastPathComponent()
+            ?? preferences.defaultExportFolder
+        panel.nameFieldStringValue = note.title.slugified
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        target.folderPath = url.path(percentEncoded: false)
     }
 
     private func run(
@@ -375,18 +422,67 @@ final class LibraryModel {
         NSWorkspace.shared.open(url)
     }
 
+    // MARK: Sites
+
+    /// Sites known locally (folders) plus any on the connected account.
+    private(set) var sites: [String] = []
+    var selectedSite = ""
+    private(set) var isLoadingSites = false
+
+    /// Reloads the site list. Sites come from the connected account and from
+    /// anything already staged locally, so a site created offline still shows.
+    func refreshSites() {
+        guard preferences.isConnected, let provider = DestinationKind.cloudflare.provider else {
+            sites = []
+            return
+        }
+        let staged = AppStorageLocation.support.appending(path: "sites", directoryHint: .isDirectory)
+        let token = storedCredential ?? (try? credentials.read(provider: provider.id)) ?? nil
+
+        isLoadingSites = true
+        Task {
+            defer { isLoadingSites = false }
+            var names = Set(
+                ((try? FileManager.default.contentsOfDirectory(
+                    at: staged, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+                )) ?? [])
+                    .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+                    .map(\.lastPathComponent)
+            )
+            if let token, let remote = try? await provider.listSites(token, preferences.accountID) {
+                names.formUnion(remote)
+            }
+            sites = names.sorted()
+            if target.site == nil || !(names.contains(target.site ?? "")) {
+                target.site = preferences.lastSite.flatMap { names.contains($0) ? $0 : nil } ?? sites.first
+            }
+        }
+    }
+
+    /// Adds a site name to the list. Nothing is created remotely until publish.
+    func createSite(named name: String) {
+        if let reason = DestinationKind.cloudflare.provider?.validateSiteName(name) {
+            connectionStatus = ConnectionStatus(message: reason, isGood: false)
+            return
+        }
+        if !sites.contains(name) { sites = (sites + [name]).sorted() }
+        target.site = name
+    }
+
     // MARK: Publishing
 
     struct ConnectionStatus: Equatable {
         let message: String
         let isGood: Bool
+        /// Set when the token works but cannot name the account, which is fixed
+        /// by widening the token rather than replacing it.
+        var needsMembershipsPermission = false
     }
 
-    /// The provider configured to publish to, if any.
     var provider: ProviderDescriptor? { ProviderRegistry.provider(id: preferences.providerID) }
 
     var canPublish: Bool {
-        provider != nil && preferences.siteRoot != nil && storedCredential?.isEmpty == false
+        preferences.isConnected && storedCredential?.isEmpty == false
     }
 
     func selectProvider(id: String?) {
@@ -398,67 +494,119 @@ final class LibraryModel {
     func loadStoredCredential() {
         guard let provider else { credentialInput = ""; return }
         storedCredential = try? credentials.read(provider: provider.id)
-        // Show that something is stored without ever putting the secret back on
-        // screen, where it could be read over a shoulder or captured in a screenshot.
-        credentialInput = storedCredential == nil ? "" : String(repeating: "•", count: 24)
+        // Never put a stored secret back on screen, where it could be read over
+        // a shoulder or captured in a screenshot.
+        credentialInput = storedCredential == nil ? "" : String(repeating: "\u{2022}", count: 24)
+        if storedCredential != nil, preferences.isConnected {
+            connectionStatus = ConnectionStatus(
+                message: "Connected to \(preferences.accountName).", isGood: true
+            )
+        }
     }
 
-    func saveAndTestCredentials() {
+    func disconnect() {
+        guard let provider else { return }
+        try? credentials.delete(provider: provider.id)
+        storedCredential = nil
+        credentialInput = ""
+        preferences.accountID = ""
+        preferences.accountName = ""
+        connectionStatus = nil
+    }
+
+    /// Validates the token and works out which account it can publish to, so
+    /// the account ID never has to be typed.
+    func connect() {
         guard let provider, !credentialInput.isEmpty else { return }
-        let secret = credentialInput.allSatisfy { $0 == "•" }
-            ? storedCredential
-            : credentialInput
+        let secret = credentialInput.allSatisfy { $0 == "\u{2022}" } ? storedCredential : credentialInput
         guard let secret, !secret.isEmpty else { return }
 
         isTestingConnection = true
         connectionStatus = nil
         Task {
             defer { isTestingConnection = false }
-            guard let publisher = provider.makePublisher(preferences, secret) else {
-                connectionStatus = ConnectionStatus(
-                    message: "Fill in every field above first.",
-                    isGood: false
-                )
-                return
-            }
             do {
-                let label = try await publisher.validateCredentials()
+                let accounts = try await provider.discoverAccounts(secret)
+
+                guard let account = accounts.first else {
+                    // The token itself is fine — it just cannot name the account.
+                    connectionStatus = ConnectionStatus(
+                        message: """
+                            That token works, but it cannot see which account it belongs to. \
+                            Add one more permission to it in Cloudflare — User \u{2192} \
+                            Memberships \u{2192} Read \u{2014} then paste it again.
+                            """,
+                        isGood: false,
+                        needsMembershipsPermission: true
+                    )
+                    return
+                }
+                if accounts.count > 1 {
+                    // Rare, and picking the first silently would publish to the
+                    // wrong place. Scope the token to one account instead.
+                    connectionStatus = ConnectionStatus(
+                        message: """
+                            This token can reach \(accounts.count) accounts \
+                            (\(accounts.map(\.name).joined(separator: ", "))). Create a token \
+                            scoped to just the one you want to publish to.
+                            """,
+                        isGood: false
+                    )
+                    return
+                }
+
                 try credentials.write(secret, provider: provider.id)
                 storedCredential = secret
-                credentialInput = String(repeating: "•", count: 24)
-                connectionStatus = ConnectionStatus(message: "Connected to \(label).", isGood: true)
+                preferences.accountID = account.id
+                preferences.accountName = account.name
+                credentialInput = String(repeating: "\u{2022}", count: 24)
+                connectionStatus = ConnectionStatus(
+                    message: "Connected to \(account.name).", isGood: true
+                )
+                if let host = try? await provider.accountHost(secret, account.id), !host.isEmpty {
+                    preferences.workersSubdomain = host
+                }
+                refreshSites()
             } catch {
-                connectionStatus = ConnectionStatus(message: error.localizedDescription, isGood: false)
+                connectionStatus = ConnectionStatus(
+                    message: error.localizedDescription, isGood: false
+                )
             }
         }
     }
 
-    /// Uploads the whole site folder. Unchanged files are skipped by the
-    /// provider's content hashing, so republishing one note is cheap.
+    /// Uploads the site this note belongs to. Everything staged for that site
+    /// goes up together, because a deploy replaces the whole asset set.
     func publish() {
-        guard let provider, let root = preferences.siteRoot else { return }
+        guard let provider = DestinationKind.cloudflare.provider else { return }
+        let site = (target.site ?? preferences.lastSite ?? "").trimmingCharacters(in: .whitespaces)
+        guard !site.isEmpty else {
+            exportState = .failed("Choose a site first.")
+            return
+        }
         guard let secret = storedCredential ?? (try? credentials.read(provider: provider.id)) ?? nil,
-              let publisher = provider.makePublisher(preferences, secret)
+              let publisher = provider.makePublisher(secret, preferences.accountID, site)
         else {
-            exportState = .failed("Connect a \(provider.displayName) account in Settings first.")
+            exportState = .failed("Connect a Cloudflare account in Settings first.")
             return
         }
 
+        let staged = AppStorageLocation.stagedSite(site)
         let summary = lastSummary
         exportState = .publishing(fraction: 0, message: "Preparing upload")
         work = Task {
             do {
-                let result = try await publisher.publish(siteRoot: root) { progress in
+                let result = try await publisher.publish(siteRoot: staged) { progress in
                     Task { @MainActor in
                         guard case .publishing = self.exportState else { return }
                         self.exportState = .publishing(
-                            fraction: progress.fraction,
-                            message: progress.message
+                            fraction: progress.fraction, message: progress.message
                         )
                     }
                 }
-                let url = summary?.slug.map { result.url.appending(path: $0, directoryHint: .isDirectory) }
-                    ?? result.url
+                let url = summary?.slug.map {
+                    result.url.appending(path: $0, directoryHint: .isDirectory)
+                } ?? result.url
                 if let summary {
                     exportState = .published(url: url, summary: summary)
                 } else {

@@ -7,8 +7,8 @@ struct SettingsView: View {
 
     var body: some View {
         TabView {
-            SiteSettings(library: library)
-                .tabItem { Label("Site", systemImage: "folder") }
+            DiskSettings(preferences: library.preferences)
+                .tabItem { Label("Folders", systemImage: "folder") }
             VideoSettings(preferences: library.preferences)
                 .tabItem { Label("Video", systemImage: "film") }
             PublishingSettings(library: library)
@@ -18,29 +18,34 @@ struct SettingsView: View {
     }
 }
 
-// MARK: - Site
+// MARK: - Disk
 
-private struct SiteSettings: View {
-    @Bindable var library: LibraryModel
+private struct DiskSettings: View {
+    @Bindable var preferences: Preferences
 
     var body: some View {
         Form {
             Section {
-                LabeledContent("Site folder") {
+                LabeledContent("Start in") {
                     HStack {
-                        Text(library.preferences.siteRoot?.path(percentEncoded: false) ?? "Not set")
-                            .foregroundStyle(library.preferences.siteRoot == nil ? .secondary : .primary)
+                        Text(preferences.defaultExportFolder?.path(percentEncoded: false) ?? "Ask each time")
+                            .foregroundStyle(preferences.defaultExportFolder == nil ? .secondary : .primary)
                             .lineLimit(1)
                             .truncationMode(.head)
                         Spacer()
-                        Button("Choose…") { chooseSiteRoot() }
+                        Button("Choose…", action: choose)
+                        if preferences.defaultExportFolder != nil {
+                            Button("Clear") { preferences.defaultExportFolder = nil }
+                        }
                     }
                 }
+            } header: {
+                Text("A folder on this Mac")
             } footer: {
                 Text("""
-                    Every note you export lands in its own subfolder here, so they publish as \
-                    one site: /workout-plan/, /recipes/, and so on. Publishing uploads this whole \
-                    folder — unchanged files are skipped, so re-publishing one note is cheap.
+                    Where the folder chooser opens when a note has no folder yet. Each note \
+                    remembers its own folder after the first export, so re-exporting never asks \
+                    again.
                     """)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -50,16 +55,15 @@ private struct SiteSettings: View {
         .padding()
     }
 
-    private func chooseSiteRoot() {
+    private func choose() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true
         panel.prompt = "Use This Folder"
-        panel.message = "Choose a folder to hold every note you publish."
+        panel.message = "Choose where the folder chooser should start."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        library.preferences.siteRoot = url
-        library.destination = .site
+        preferences.defaultExportFolder = url
     }
 }
 
@@ -104,10 +108,35 @@ private struct VideoSettings: View {
     }
 }
 
+/// A numbered instruction. The text is Markdown so providers can bold the
+/// labels a user has to click without the UI knowing anything about them.
+private struct NumberedStep: View {
+    let number: Int
+    let text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("\(number)")
+                .font(.caption.weight(.bold).monospacedDigit())
+                .foregroundStyle(.white)
+                .frame(width: 17, height: 17)
+                .background(.tint, in: .circle)
+            Text(.init(text))
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
 // MARK: - Publishing
 
 private struct PublishingSettings: View {
     @Bindable var library: LibraryModel
+
+    private var provider: ProviderDescriptor? {
+        ProviderRegistry.provider(id: library.preferences.providerID)
+    }
 
     var body: some View {
         Form {
@@ -123,58 +152,100 @@ private struct PublishingSettings: View {
                 }
             }
 
-            if let provider = ProviderRegistry.provider(id: library.preferences.providerID) {
-                Section {
-                    ForEach(provider.settings) { field in
-                        TextField(field.label, text: Binding(
-                            get: { field.value(library.preferences) },
-                            set: { field.setValue(library.preferences, $0) }
-                        ), prompt: Text(field.prompt))
-                        .help(field.help)
-                    }
-
-                    SecureField(provider.capabilities.credentialLabel, text: $library.credentialInput,
-                                prompt: Text("Paste it here"))
-
-                    HStack {
-                        if let url = provider.capabilities.credentialURL {
-                            Link("Create a token…", destination: url)
-                        }
-                        Spacer()
-                        Button("Save & Test") { library.saveAndTestCredentials() }
-                            .disabled(library.credentialInput.isEmpty || library.isTestingConnection)
-                        if library.isTestingConnection {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
-
-                    if let status = library.connectionStatus {
-                        Label(status.message, systemImage: status.isGood ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(status.isGood ? .green : .orange)
-                            .font(.callout)
-                    }
-                } header: {
-                    Text(provider.displayName)
-                } footer: {
-                    Text(provider.capabilities.credentialHelp)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            if let provider {
+                if library.preferences.isConnected {
+                    connected(provider)
+                } else {
+                    steps(provider)
                 }
-            }
 
-            Section {
-                Text("""
-                    Your token is stored in the macOS Keychain, never in a preferences file and \
-                    never in this app's source. Nothing is embedded in the app itself — you create \
-                    the token, you can revoke it, and it never leaves your Mac except to the \
-                    provider you chose.
-                    """)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                tokenField(provider)
             }
         }
         .formStyle(.grouped)
         .padding()
         .onAppear { library.loadStoredCredential() }
+    }
+
+    @ViewBuilder
+    private func connected(_ provider: ProviderDescriptor) -> some View {
+        Section {
+            LabeledContent("Account") {
+                HStack {
+                    Text(library.preferences.accountName)
+                    Spacer()
+                    Button("Disconnect") { library.disconnect() }
+                }
+            }
+        } header: {
+            Text(provider.displayName)
+        }
+    }
+
+    @ViewBuilder
+    private func steps(_ provider: ProviderDescriptor) -> some View {
+        if !provider.capabilities.credentialSteps.isEmpty {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(provider.capabilities.credentialSteps.enumerated()), id: \.offset) { index, step in
+                        NumberedStep(number: index + 1, text: step)
+                    }
+                    if let url = provider.capabilities.credentialURL {
+                        Link("Create a token…", destination: url)
+                            .padding(.top, 2)
+                    }
+                }
+                .padding(.vertical, 2)
+            } header: {
+                Text("Getting a \(provider.capabilities.credentialLabel)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tokenField(_ provider: ProviderDescriptor) -> some View {
+        Section {
+            SecureField(
+                provider.capabilities.credentialLabel,
+                text: $library.credentialInput,
+                prompt: Text("Paste it here")
+            )
+            .onSubmit { library.connect() }
+
+            HStack {
+                Button(library.preferences.isConnected ? "Update Token" : "Connect") {
+                    library.connect()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(library.credentialInput.isEmpty || library.isTestingConnection)
+                if library.isTestingConnection {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
+
+            if let status = library.connectionStatus {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label {
+                        Text(status.message)
+                    } icon: {
+                        Image(systemName: status.isGood
+                            ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    }
+                    .foregroundStyle(status.isGood ? .green : .orange)
+
+                    if status.needsMembershipsPermission,
+                       let url = provider.capabilities.credentialURL {
+                        Link("Edit the token…", destination: url)
+                    }
+                }
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        } footer: {
+            Text(provider.capabilities.credentialHelp)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 }

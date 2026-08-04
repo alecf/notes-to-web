@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.0
+
+- **Publish straight to Cloudflare.** Paste an API token and the app uploads for
+  you. Several notes can share one address as sibling paths —
+  `alecs-notes.…workers.dev/workout-plan/`, `/knife-skills/` — and unchanged
+  files are skipped by content hash, so republishing one note uploads only that
+  note.
+- **Each note remembers where it was published**, including which site and path,
+  so re-publishing an updated note is Export then Return. Switching destinations
+  does not lose the other one's settings.
+- Setup asks for one thing: the API token. The account is discovered from it.
+- Tokens are stored in the macOS Keychain. Nothing is embedded in the app.
+- Fixed: account-scoped API tokens were rejected as invalid. They cannot call
+  `/user/tokens/verify` — it returns 401 even when the token works perfectly —
+  so validation no longer depends on it.
+- Fixed: the export progress bar could jump backwards when a video needed a
+  second encoding pass to fit its size budget.
+
 ## 0.2.0
 
 **Requires macOS 26 or later on Apple Silicon.** Support for macOS 14–15 and

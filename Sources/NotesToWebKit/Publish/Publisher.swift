@@ -67,6 +67,9 @@ public struct ProviderCapabilities: Sendable {
     public let credentialLabel: String
     /// Human instructions for obtaining the credential, shown in the UI.
     public let credentialHelp: String
+    /// The same instructions as discrete steps, so the UI can number them
+    /// instead of presenting a paragraph nobody reads.
+    public let credentialSteps: [String]
     /// Where to go create it.
     public let credentialURL: URL?
 
@@ -76,8 +79,10 @@ public struct ProviderCapabilities: Sendable {
         supportsSubpaths: Bool,
         credentialLabel: String,
         credentialHelp: String,
+        credentialSteps: [String] = [],
         credentialURL: URL?
     ) {
+        self.credentialSteps = credentialSteps
         self.maxFileSize = maxFileSize
         self.maxFileCount = maxFileCount
         self.supportsSubpaths = supportsSubpaths
@@ -117,7 +122,9 @@ public enum PublishError: Error, LocalizedError, Equatable {
     case fileTooLarge(path: String, size: Int64, limit: Int64, provider: String)
     case tooManyFiles(count: Int, limit: Int, provider: String)
     case unreadableFile(path: String, reason: String)
-    case invalidSiteName(String)
+    /// `reason` is the provider's own rule, in a sentence: the generic version of this
+    /// message sends people off to guess which character was the problem.
+    case invalidSiteName(name: String, reason: String)
     case credentialRejected(String)
     case accountNotFound(String)
     /// The provider took the files but never told us the deployment was complete.
@@ -143,11 +150,8 @@ public enum PublishError: Error, LocalizedError, Equatable {
             """
         case .unreadableFile(let path, let reason):
             "Could not read \(path): \(reason)"
-        case .invalidSiteName(let name):
-            """
-            "\(name)" is not a usable site name. Use lowercase letters, numbers and dashes only, \
-            starting with a letter or number.
-            """
+        case .invalidSiteName(let name, let reason):
+            "“\(name)” is not a usable site name. \(reason)"
         case .credentialRejected(let detail):
             detail
         case .accountNotFound(let identifier):
