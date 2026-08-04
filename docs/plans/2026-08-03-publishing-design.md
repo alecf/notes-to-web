@@ -168,20 +168,106 @@ bar: one 20 MB video and ten 4 KB files are not eleven equal units.
 
 ## Secrets
 
-**Nothing is embedded in this app.** It is open source and distributed as a
-binary; any secret compiled into it is a published secret. There is no OAuth
-client ID, no app key, no service account.
+**No secret is embedded in this app.** It is open source and distributed as a
+binary; any secret compiled into it is a published secret. There is no client
+secret, no app key, no service account.
 
-Instead the user creates a scoped credential and pastes it. It is stored in the
-**macOS Keychain** (`kSecClassGenericPassword`, `kSecAttrAccessibleWhenUnlocked`,
-service `com.alecf.notes-to-web`, account = provider ID) — never in
-`UserDefaults`, never in a plist, never in a log line, never in an error message.
-`Preferences` holds only non-sensitive values: account ID, site name, quality
-settings.
+There *is* now a public OAuth **client ID**, and that is not a contradiction —
+see [Signing in](#signing-in) below. The rule is about secrets, and a client ID
+is a public identifier by design.
 
-Once stored, the credential is never displayed again. The settings field shows
+Credentials are stored in the **macOS Keychain**
+(`kSecClassGenericPassword`, `kSecAttrAccessibleWhenUnlocked`, service
+`com.alecf.notes-to-web`) — never in `UserDefaults`, never in a plist, never in
+a log line, never in an error message. Two accounts are used: the provider ID
+holds a pasted API token, and `cloudflare-workers.oauth` holds the JSON-encoded
+OAuth tokens. `Preferences` holds only non-sensitive values: account ID, site
+name, quality settings, and which of the two routes is in use.
+
+Once stored, a token is never displayed again. The settings field shows
 placeholder bullets, so a stored token cannot be read off the screen or captured
-in a screenshot.
+in a screenshot. OAuth tokens are never rendered at all — they live behind the
+session actor and only ever become an `Authorization` header.
+
+## Signing in
+
+Two routes, because they fail for different people.
+
+### The pre-filled token link
+
+The original flow asked the user to find *Account → Workers Scripts → Edit* in a
+dropdown of well over a hundred permissions. That search was the single most
+intimidating step, and it turns out to be entirely avoidable: Cloudflare
+documents a template URL format that pre-fills the token form.
+
+```
+https://dash.cloudflare.com/profile/api-tokens
+  ?permissionGroupKeys=[{"key":"workers_scripts","type":"edit"},
+                        {"key":"account_settings","type":"read"}]
+  &accountId=*&zoneId=all&name=Notes%20to%20Web
+```
+
+Cloudflare publishes this exact pairing as its own "Workers scripts only"
+template, so the format is not reverse-engineered. `account_settings: read` is
+added on the theory that it is what `GET /accounts` needs — unverified, chosen
+because Cloudflare's *Edit Cloudflare Workers* template bundles it, and harmless
+if wrong because account discovery already treats a refusal as "ask the user".
+
+Five steps became four, and none of them is a search.
+
+### OAuth, which is possible now and was not before
+
+Cloudflare shipped **self-managed OAuth clients in June 2026**, after the first
+version of this document was written. That changes the calculus: a public client
+using **PKCE** needs no client secret, so the "nothing embedded" rule survives.
+
+The evidence, all first-party:
+
+- `dash.cloudflare.com/.well-known/openid-configuration` advertises
+  `code_challenge_methods_supported: ["plain", "S256"]` and
+  `token_endpoint_auth_methods_supported` including `"none"`.
+- Cloudflare's own docs: "Your application generates a unique code verifier and
+  code challenge for every login request instead of using a static client secret."
+- Wrangler already does this, redirecting to `http://localhost:8976/oauth/callback`
+  with a client ID committed to a public repository — which is also the practical
+  proof that Cloudflare will redirect to loopback.
+
+The flow is the standard one: bind a loopback listener on **port 9787**, open the
+browser to `/oauth2/auth` with a `state` and an S256 challenge, catch the
+redirect, exchange the code plus verifier at `/oauth2/token`, store the tokens.
+
+Three decisions worth recording:
+
+- **Loopback, not a custom URL scheme.** RFC 8252 prefers it, and the reason is
+  concrete: any app can register `notestoweb://` and steal the callback, but only
+  one process can hold a port. The literal `127.0.0.1` is used rather than
+  `localhost`, because a name can resolve somewhere else.
+- **The port is fixed, not ephemeral.** Cloudflare matches `redirect_uri` against
+  the exact strings registered on the client, so an OS-assigned port could never
+  match.
+- **`allowLocalEndpointReuse` is off.** With it on, a second `NWListener` binds a
+  port the first already holds, so a stale sign-in could silently take a newer
+  one's callback. A clash has to be an error. This was caught by a test that
+  expected a conflict and did not get one.
+
+`CloudflareAPI` asks for its bearer token **per request** rather than holding one,
+which is what lets a refresh land between two requests of a publish that takes
+minutes. Refreshes are serialised through an actor: two concurrent refreshes
+would each spend the refresh token, and Cloudflare is free to invalidate the
+loser.
+
+A refresh failure only clears the stored tokens when Cloudflare says
+`invalid_grant`. An outage or a flaky network leaves them alone — otherwise every
+hiccup becomes a re-sign-in.
+
+**Not yet verified against the live service.** No client is registered, so
+`bakedInClientID` is empty and the button is hidden; the app falls back to the
+token flow, which is fully working. Two things need confirming before that
+changes: the real scope names (the constants are a best guess from Cloudflare's
+lone `workers-platform.read` example — the authoritative list comes from
+`GET /oauth/scopes`), and whether a loopback redirect URL is accepted at client
+registration. Making a client's visibility **public** is permanent and requires
+domain verification, so testing with a private client first is worth the detour.
 
 ### What the user needs to create
 

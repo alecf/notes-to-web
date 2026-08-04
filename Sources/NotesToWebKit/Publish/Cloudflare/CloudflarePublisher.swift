@@ -24,14 +24,15 @@ public struct CloudflarePublisher: SitePublisher {
         The token is kept in your login keychain and sent only to api.cloudflare.com. \
         Nothing is embedded in this app, and you can revoke it from the same page at any time.
         """,
+        // Four steps, none of which is "find the right entry in a list of a hundred
+        // permissions": the link below opens the form with them already selected.
         credentialSteps: [
-            "Open the Cloudflare dashboard and sign in. A free account is enough.",
-            "Click **Create a token** below, then choose **Create Custom Token**.",
-            "Give it any name, and add one permission: **Account** → **Workers Scripts** → **Edit**.",
-            "Under **Account Resources**, pick the account you want to publish to.",
-            "Continue to summary, create the token, and copy it. Cloudflare shows it once and never again.",
+            "Click **Create a token** below. Cloudflare will ask you to sign in — a free account is enough.",
+            "The permissions are already filled in. Under **Account Resources**, choose the account to publish to.",
+            "Continue to summary, then **Create Token**.",
+            "Copy the token and paste it below. Cloudflare shows it once and never again.",
         ],
-        credentialURL: URL(string: "https://dash.cloudflare.com/profile/api-tokens")
+        credentialURL: CloudflarePublisher.tokenTemplateURL
     )
 
     /// Cloudflare's asset upload endpoint takes base64, which inflates a payload by a third;

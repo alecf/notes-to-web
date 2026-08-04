@@ -22,6 +22,7 @@ final class Preferences {
         _accountName = defaults.string(forKey: Key.accountName) ?? ""
         _lastSite = defaults.string(forKey: Key.lastSite)
         _workersSubdomain = defaults.string(forKey: Key.workersSubdomain) ?? ""
+        _usesOAuth = defaults.bool(forKey: Key.usesOAuth)
     }
 
     private enum Key {
@@ -37,6 +38,10 @@ final class Preferences {
         static let accountName = "publish.accountName"
         static let lastSite = "publish.lastSite"
         static let workersSubdomain = "publish.workersSubdomain"
+        // Which half of the credential story this account was connected with. Without it,
+        // a user holding both a pasted token and a browser sign-in gets whichever the
+        // lookup order happens to find, which is not necessarily the one they chose.
+        static let usesOAuth = "publish.usesOAuth"
     }
 
     // MARK: Video
@@ -118,4 +123,11 @@ final class Preferences {
     }
 
     var isConnected: Bool { !accountID.isEmpty }
+
+    /// True when the connection came from a browser sign-in rather than a pasted token.
+    private var _usesOAuth: Bool
+    var usesOAuth: Bool {
+        get { _usesOAuth }
+        set { _usesOAuth = newValue; defaults.set(newValue, forKey: Key.usesOAuth) }
+    }
 }

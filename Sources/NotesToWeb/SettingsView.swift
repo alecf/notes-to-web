@@ -216,10 +216,13 @@ private struct PublishingSettings: View {
                 if library.preferences.isConnected {
                     connected(provider)
                 } else {
+                    if library.supportsOAuth { signIn(provider) }
                     steps(provider)
                 }
 
-                tokenField(provider)
+                if !library.preferences.isConnected || !library.preferences.usesOAuth {
+                    tokenField(provider)
+                }
             }
         }
         .formStyle(.grouped)
@@ -239,6 +242,40 @@ private struct PublishingSettings: View {
             }
         } header: {
             Text(provider.displayName)
+        } footer: {
+            // Which of the two routes is in use, because "Disconnect" means something
+            // slightly different for each and the token field appears for only one.
+            Text(library.preferences.usesOAuth
+                ? "Signed in through your browser. Disconnecting also revokes this app's access."
+                : "Connected with an API token stored in your login keychain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// The one-click route. Shown first and styled as the primary action, because the
+    /// alternative below is five steps in a dashboard.
+    @ViewBuilder
+    private func signIn(_ provider: ProviderDescriptor) -> some View {
+        Section {
+            HStack {
+                Button("Sign in with \(provider.displayName)…") {
+                    library.signInWithBrowser()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(library.isTestingConnection)
+                if library.isTestingConnection {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+            }
+        } footer: {
+            Text("""
+                Opens your browser to approve access, then comes straight back. Nothing is \
+                typed or pasted, and this app never sees your Cloudflare password.
+                """)
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -257,7 +294,11 @@ private struct PublishingSettings: View {
                 }
                 .padding(.vertical, 2)
             } header: {
-                Text("Getting a \(provider.capabilities.credentialLabel)")
+                // Reads as the fallback when a sign-in button sits above it, and as the
+                // only route when it does not.
+                Text(library.supportsOAuth
+                    ? "Or use a \(provider.capabilities.credentialLabel)"
+                    : "Getting a \(provider.capabilities.credentialLabel)")
             }
         }
     }

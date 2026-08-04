@@ -8,6 +8,11 @@ VERSION  := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString
 # quirks (see AGENTS.md on package resources).
 BINDIR   := $(shell swift build -c $(CONFIG) --show-bin-path)
 
+# Optional override for the Cloudflare OAuth client ID. Normally unset: the ID is a public
+# identifier and lives in CloudflareOAuthConfiguration.swift, so releases need no CI setup.
+# It is NOT a secret and must never be a GitHub Actions *secret* — a plain variable at most.
+CF_OAUTH_CLIENT_ID ?=
+
 .DEFAULT_GOAL := help
 
 ## help: list available targets
@@ -32,6 +37,11 @@ app: build
 	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
 	@cp $(BINDIR)/$(APP) $(BUNDLE)/Contents/MacOS/$(APP)
 	@cp Resources/Info.plist $(BUNDLE)/Contents/Info.plist
+	@if [ -n "$(CF_OAUTH_CLIENT_ID)" ]; then \
+		/usr/libexec/PlistBuddy -c "Add :CFOAuthClientID string $(CF_OAUTH_CLIENT_ID)" \
+			$(BUNDLE)/Contents/Info.plist >/dev/null; \
+		echo "  OAuth client ID from CF_OAUTH_CLIENT_ID"; \
+	fi
 	@if [ -f Resources/AppIcon.icns ]; then cp Resources/AppIcon.icns $(BUNDLE)/Contents/Resources/; fi
 	@printf 'APPL????' > $(BUNDLE)/Contents/PkgInfo
 	@codesign --force --sign - \

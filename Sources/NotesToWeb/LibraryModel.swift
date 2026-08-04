@@ -465,7 +465,7 @@ final class LibraryModel {
             return
         }
         let staged = AppStorageLocation.support.appending(path: "sites", directoryHint: .isDirectory)
-        let token = storedCredential ?? (try? credentials.read(provider: provider.id)) ?? nil
+        let credential = self.credential
 
         isLoadingSites = true
         Task {
@@ -477,7 +477,8 @@ final class LibraryModel {
                     .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                     .map(\.lastPathComponent)
             )
-            if let token, let remote = try? await provider.listSites(token, preferences.accountID) {
+            if let credential,
+               let remote = try? await provider.listSites(credential, preferences.accountID) {
                 names.formUnion(remote)
             }
             sites = names.sorted()
@@ -509,9 +510,22 @@ final class LibraryModel {
 
     var provider: ProviderDescriptor? { ProviderRegistry.provider(id: preferences.providerID) }
 
-    var canPublish: Bool {
-        preferences.isConnected && storedCredential?.isEmpty == false
+    /// The credential to authenticate with, or nil when nothing is connected.
+    ///
+    /// A browser sign-in is not readable from here — the tokens live in the Keychain behind
+    /// the session actor, which is the point — so `.oauth` is a marker rather than a value.
+    var credential: PublishCredential? {
+        if preferences.usesOAuth { return provider?.oauth == nil ? nil : .oauth }
+        guard let secret = storedCredential, !secret.isEmpty else { return nil }
+        return .token(secret)
     }
+
+    var canPublish: Bool {
+        preferences.isConnected && credential != nil
+    }
+
+    /// Whether this build offers a browser sign-in for the selected provider.
+    var supportsOAuth: Bool { provider?.oauth != nil }
 
     func selectProvider(id: String?) {
         preferences.providerID = id
@@ -525,7 +539,7 @@ final class LibraryModel {
         // Never put a stored secret back on screen, where it could be read over
         // a shoulder or captured in a screenshot.
         credentialInput = storedCredential == nil ? "" : String(repeating: "\u{2022}", count: 24)
-        if storedCredential != nil, preferences.isConnected {
+        if credential != nil, preferences.isConnected {
             connectionStatus = ConnectionStatus(
                 message: "Connected to \(preferences.accountName).", isGood: true
             )
@@ -534,12 +548,43 @@ final class LibraryModel {
 
     func disconnect() {
         guard let provider else { return }
+        let wasOAuth = preferences.usesOAuth
         try? credentials.delete(provider: provider.id)
         storedCredential = nil
         credentialInput = ""
         preferences.accountID = ""
         preferences.accountName = ""
+        preferences.usesOAuth = false
         connectionStatus = nil
+        // Local state is already cleared, so a revocation that fails still leaves the user
+        // disconnected. Telling them "disconnect failed" would be worse than useless.
+        if wasOAuth, let oauth = provider.oauth {
+            Task { await oauth.signOut() }
+        }
+    }
+
+    /// Opens the browser, waits for the redirect, then resolves the account exactly as the
+    /// token path does — the difference between the two ends at the credential.
+    func signInWithBrowser() {
+        guard let provider, let oauth = provider.oauth else { return }
+
+        isTestingConnection = true
+        connectionStatus = nil
+        Task {
+            defer { isTestingConnection = false }
+            do {
+                try await oauth.signIn()
+                // Set before resolving the account so `credential` reports `.oauth` while
+                // the discovery calls below are made.
+                preferences.usesOAuth = true
+                try await resolveAccount(provider: provider, credential: .oauth)
+            } catch {
+                preferences.usesOAuth = false
+                connectionStatus = ConnectionStatus(
+                    message: error.localizedDescription, isGood: false
+                )
+            }
+        }
     }
 
     /// Validates the token and works out which account it can publish to, so
@@ -554,53 +599,83 @@ final class LibraryModel {
         Task {
             defer { isTestingConnection = false }
             do {
-                let accounts = try await provider.discoverAccounts(secret)
-
-                guard let account = accounts.first else {
-                    // The token itself is fine — it just cannot name the account.
-                    connectionStatus = ConnectionStatus(
-                        message: """
-                            That token works, but it cannot see which account it belongs to. \
-                            Add one more permission to it in Cloudflare — User \u{2192} \
-                            Memberships \u{2192} Read \u{2014} then paste it again.
-                            """,
-                        isGood: false,
-                        needsMembershipsPermission: true
-                    )
+                // Written only once the account resolves, so a bad token never displaces a
+                // good one already in the keychain.
+                guard try await resolveAccount(provider: provider, credential: .token(secret)) else {
                     return
                 }
-                if accounts.count > 1 {
-                    // Rare, and picking the first silently would publish to the
-                    // wrong place. Scope the token to one account instead.
-                    connectionStatus = ConnectionStatus(
-                        message: """
-                            This token can reach \(accounts.count) accounts \
-                            (\(accounts.map(\.name).joined(separator: ", "))). Create a token \
-                            scoped to just the one you want to publish to.
-                            """,
-                        isGood: false
-                    )
-                    return
-                }
-
                 try credentials.write(secret, provider: provider.id)
                 storedCredential = secret
-                preferences.accountID = account.id
-                preferences.accountName = account.name
+                preferences.usesOAuth = false
                 credentialInput = String(repeating: "\u{2022}", count: 24)
-                connectionStatus = ConnectionStatus(
-                    message: "Connected to \(account.name).", isGood: true
-                )
-                if let host = try? await provider.accountHost(secret, account.id), !host.isEmpty {
-                    preferences.workersSubdomain = host
-                }
-                refreshSites()
             } catch {
                 connectionStatus = ConnectionStatus(
                     message: error.localizedDescription, isGood: false
                 )
             }
         }
+    }
+
+    /// Works out which account a credential can publish to, and records it.
+    ///
+    /// Shared by both sign-in paths: once a credential exists, "which account is this?" is
+    /// the same question and deserves the same answers, including the awkward ones.
+    /// Returns false when it reported a problem the user has to fix.
+    @discardableResult
+    private func resolveAccount(
+        provider: ProviderDescriptor, credential: PublishCredential
+    ) async throws -> Bool {
+        let accounts = try await provider.discoverAccounts(credential)
+
+        guard let account = accounts.first else {
+            // The credential itself is fine — it just cannot name the account.
+            connectionStatus = ConnectionStatus(
+                message: credential == .oauth
+                    ? """
+                        You're signed in, but this app could not tell which account to \
+                        publish to. Sign in again and make sure the account you want is \
+                        selected on Cloudflare's page.
+                        """
+                    : """
+                        That token works, but it cannot see which account it belongs to. \
+                        Add one more permission to it in Cloudflare — User \u{2192} \
+                        Memberships \u{2192} Read \u{2014} then paste it again.
+                        """,
+                isGood: false,
+                needsMembershipsPermission: credential != .oauth
+            )
+            return false
+        }
+        if accounts.count > 1 {
+            // Rare, and picking the first silently would publish to the
+            // wrong place. Scope the credential to one account instead.
+            connectionStatus = ConnectionStatus(
+                message: credential == .oauth
+                    ? """
+                        This sign-in can reach \(accounts.count) accounts \
+                        (\(accounts.map(\.name).joined(separator: ", "))). Sign in again and \
+                        grant access to just the one you want to publish to.
+                        """
+                    : """
+                        This token can reach \(accounts.count) accounts \
+                        (\(accounts.map(\.name).joined(separator: ", "))). Create a token \
+                        scoped to just the one you want to publish to.
+                        """,
+                isGood: false
+            )
+            return false
+        }
+
+        preferences.accountID = account.id
+        preferences.accountName = account.name
+        connectionStatus = ConnectionStatus(
+            message: "Connected to \(account.name).", isGood: true
+        )
+        if let host = try? await provider.accountHost(credential, account.id), !host.isEmpty {
+            preferences.workersSubdomain = host
+        }
+        refreshSites()
+        return true
     }
 
     /// Uploads the site this note belongs to. Everything staged for that site
@@ -612,8 +687,8 @@ final class LibraryModel {
             exportState = .failed("Choose a site first.")
             return
         }
-        guard let secret = storedCredential ?? (try? credentials.read(provider: provider.id)) ?? nil,
-              let publisher = provider.makePublisher(secret, preferences.accountID, site)
+        guard let credential,
+              let publisher = provider.makePublisher(credential, preferences.accountID, site)
         else {
             exportState = .failed("Connect a Cloudflare account in Settings first.")
             return

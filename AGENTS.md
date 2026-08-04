@@ -135,6 +135,23 @@ verify-then-correct loops silently no-op. It bit the transcoder's corrective
 pass and then bit the cache key, where a rewritten file kept its old key and
 would have served a stale encode. Use `FileManager.attributesOfItem`.
 
+**`NWListener` with `allowLocalEndpointReuse` lets two listeners hold one port.**
+It reads like the flag that stops "address already in use" after a crash, but it
+also means a second listener binds a port the first still owns — so a stale OAuth
+sign-in can silently swallow the callback meant for a newer one. It is off in
+`OAuthCallbackListener`, and a test asserts the clash is an error. Related: a
+bind failure arrives asynchronously as `.waiting`, not `.failed`, and not out of
+the initializer — the listener politely retries forever, which to a sign-in is
+indistinguishable from being broken. `start()` awaits `.ready` for this reason.
+
+**The OAuth flow is unverified against the live service.** No client is
+registered yet, so `bakedInClientID` is empty, the sign-in button is hidden, and
+everything falls back to the API-token path. The scope names in
+`CloudflareOAuthConfiguration` are a best guess from Cloudflare's single
+documented example; the real list comes from `GET /oauth/scopes` with a token.
+Do not treat the passing tests as evidence the handshake works end to end — they
+prove the protocol mechanics, not Cloudflare's acceptance of them.
+
 **Full Disk Access is required** and is keyed to the signed binary. After a
 rebuild, macOS may treat the app as new — if the app suddenly reports no
 permission during development, toggle it off and on in System Settings.
@@ -151,6 +168,11 @@ permission during development, toggle it off and on in System Settings.
   binary; a compiled-in token is a published token. Users create their own
   credential and it goes in the Keychain — never `UserDefaults`, never a log
   line, never an error message, never back onto the screen once stored.
+  **An OAuth client ID is not a secret** and is committed on purpose — see
+  `CloudflareOAuthConfiguration`. A client *secret* would break this rule, which
+  is why the OAuth client is a public one using PKCE and there is no
+  `clientSecret` field anywhere. Do not "fix" this by moving the client ID into
+  a GitHub Actions secret; it is a public identifier like the bundle ID.
 - **No new dependencies for video.** VideoToolbox has H.264 and HEVC encoders
   and nothing else; that constraint is the reason the exporter offers no AV1 or
   WebM, and it is a deliberate tradeoff, not an oversight. See

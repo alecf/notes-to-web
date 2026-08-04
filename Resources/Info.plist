@@ -2,35 +2,35 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>NotesToWeb</string>
 	<key>CFBundleDisplayName</key>
 	<string>Notes to Web</string>
+	<key>CFBundleExecutable</key>
+	<string>NotesToWeb</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.alecf.notes-to-web</string>
-	<key>CFBundleExecutable</key>
+	<key>CFBundleName</key>
 	<string>NotesToWeb</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.3.1</string>
+	<string>0.4.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSRequiresNativeExecution</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Notes to Web reads your note titles and folders from the Notes app so you can pick which note to publish.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT licensed. https://github.com/alecf/notes-to-web</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Notes to Web reads your note titles and folders from the Notes app so you can pick which note to publish.</string>
-	<key>NSSupportsAutomaticTermination</key>
-	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<true/>
 </dict>
 </plist>

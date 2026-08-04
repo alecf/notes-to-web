@@ -257,10 +257,15 @@ public struct CloudflareAPI: Sendable {
 
     public static let defaultBaseURL = URL(string: "https://api.cloudflare.com/client/v4")!
 
+    /// Supplies the bearer token for a request. Asked **per request** rather than once at
+    /// construction, so an OAuth refresh partway through a long publish is picked up by the
+    /// next call instead of failing the rest of the upload with a token that expired.
+    public typealias TokenSource = @Sendable () async throws -> String
+
     public let baseURL: URL
     public let retryPolicy: RetryPolicy
     /// Never logged, never interpolated into an error.
-    private let token: String
+    private let tokenSource: TokenSource
     private let execute: Executor
     private let sleep: Sleeper
 
@@ -271,7 +276,24 @@ public struct CloudflareAPI: Sendable {
         executor: Executor? = nil,
         sleeper: Sleeper? = nil
     ) {
-        self.token = token
+        self.init(
+            tokenSource: { token },
+            baseURL: baseURL,
+            retryPolicy: retryPolicy,
+            executor: executor,
+            sleeper: sleeper
+        )
+    }
+
+    /// The OAuth form: the token is fetched (and refreshed if needed) for every request.
+    public init(
+        tokenSource: @escaping TokenSource,
+        baseURL: URL = CloudflareAPI.defaultBaseURL,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        executor: Executor? = nil,
+        sleeper: Sleeper? = nil
+    ) {
+        self.tokenSource = tokenSource
         self.baseURL = baseURL
         self.retryPolicy = retryPolicy
         self.execute = executor ?? CloudflareAPI.urlSessionExecutor
@@ -295,7 +317,7 @@ public struct CloudflareAPI: Sendable {
         as type: T.Type = T.self,
         credential: Credential = .accountToken
     ) async throws -> T? {
-        try await send(request(path, method: "GET", credential: credential), as: type)
+        try await send(try await request(path, method: "GET", credential: credential), as: type)
     }
 
     public func postJSON<Body: Encodable & Sendable, T: Decodable & Sendable>(
@@ -304,7 +326,7 @@ public struct CloudflareAPI: Sendable {
         as type: T.Type = T.self,
         credential: Credential = .accountToken
     ) async throws -> T? {
-        var urlRequest = request(path, method: "POST", credential: credential)
+        var urlRequest = try await request(path, method: "POST", credential: credential)
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try encoder.encode(body)
         return try await send(urlRequest, as: type)
@@ -326,6 +348,23 @@ public struct CloudflareAPI: Sendable {
         credential: Credential = .accountToken
     ) async throws -> T? {
         try await sendMultipart(path, method: "PUT", form: form, as: type, credential: credential)
+    }
+
+    /// The OAuth form, spelled as the thing callers actually have.
+    public init(
+        session: CloudflareOAuthSession,
+        baseURL: URL = CloudflareAPI.defaultBaseURL,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        executor: Executor? = nil,
+        sleeper: Sleeper? = nil
+    ) {
+        self.init(
+            tokenSource: session.tokenSource,
+            baseURL: baseURL,
+            retryPolicy: retryPolicy,
+            executor: executor,
+            sleeper: sleeper
+        )
     }
 
     /// Unwraps a `result` the caller cannot proceed without.
@@ -353,19 +392,23 @@ public struct CloudflareAPI: Sendable {
         as type: T.Type,
         credential: Credential
     ) async throws -> T? {
-        var urlRequest = request(path, method: method, credential: credential)
+        var urlRequest = try await request(path, method: method, credential: credential)
         urlRequest.setValue(form.contentTypeHeader, forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = form.encoded()
         return try await send(urlRequest, as: type)
     }
 
-    private func request(_ path: String, method: String, credential: Credential) -> URLRequest {
+    private func request(_ path: String, method: String, credential: Credential) async throws -> URLRequest {
         let url = URL(string: baseURL.absoluteString + path) ?? baseURL
         var request = URLRequest(url: url)
         request.httpMethod = method
         switch credential {
-        case .accountToken: request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        case .bearer(let jwt): request.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
+        case .accountToken:
+            // An upload-session JWT is not asked for here, so a refresh only ever happens
+            // on calls that actually need the account credential.
+            request.setValue("Bearer \(try await tokenSource())", forHTTPHeaderField: "Authorization")
+        case .bearer(let jwt):
+            request.setValue("Bearer \(jwt)", forHTTPHeaderField: "Authorization")
         }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request

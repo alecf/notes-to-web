@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+
+- **Connecting Cloudflare no longer means hunting through a permissions list.**
+  The **Create a token** link now opens Cloudflare's token form with the right
+  permissions already selected, so setup is four steps and none of them is a
+  search. Previously you had to find *Account → Workers Scripts → Edit* among
+  well over a hundred entries, which was the most intimidating part of getting
+  started.
+- Groundwork for **Sign in with Cloudflare**, a one-click alternative to creating
+  a token at all. It is not switched on in this release: Cloudflare only began
+  offering the kind of OAuth client this needs in June 2026, and the app has to
+  register one before the button can appear. Until then the token flow is
+  unchanged and remains the only route.
+- Still nothing secret is embedded in the app. The sign-in uses PKCE, which
+  replaces a client secret with a value generated fresh on your Mac for each
+  sign-in and never stored.
+
 ## 0.3.1
 
 - **Re-exporting a note no longer re-compresses its video.** Encodes are cached
