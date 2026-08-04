@@ -853,11 +853,19 @@ public actor VideoTranscoder {
         })
     }()
 
-    /// Whether this machine can hardware-encode at all. Virtualized CI runners
-    /// often cannot, and encoding through a software fallback is slow enough to
-    /// look like a hang, so the encoding tests skip themselves rather than
-    /// stalling the build.
+    /// Whether this machine can hardware-encode at all.
     public static var supportsHardwareEncoding: Bool { !hardwareEncoderCodecs.isEmpty }
+
+    /// Whether the encoding test suites should run.
+    ///
+    /// GitHub's macOS runners *advertise* a hardware encoder but block forever
+    /// when one is actually used — a stuck job with no output, not a failure, so
+    /// no timeout in the test itself can rescue it. Encoding is therefore
+    /// verified on real hardware only. Set `CI=` empty to force it on.
+    public static var canRunEncodingTests: Bool {
+        supportsHardwareEncoding
+            && (ProcessInfo.processInfo.environment["CI"] ?? "").isEmpty
+    }
 
     static func hasHardwareEncoder(for codec: VideoCodec) -> Bool {
         switch codec {

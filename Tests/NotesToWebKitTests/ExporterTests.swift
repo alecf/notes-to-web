@@ -6,7 +6,7 @@ import Testing
 
 /// End-to-end coverage of the seam between the exporter, the transcoder, and
 /// the renderer: the part neither component's own tests can see.
-@Suite("Exporter", .enabled(if: VideoTranscoder.supportsHardwareEncoding, "no hardware video encoder on this machine"), .timeLimit(.minutes(5)))
+@Suite("Exporter", .enabled(if: VideoTranscoder.canRunEncodingTests, "no usable hardware video encoder here"), .timeLimit(.minutes(5)))
 struct ExporterTests {
     private func withScratch<T>(_ body: (URL) async throws -> T) async throws -> T {
         let dir = FileManager.default.temporaryDirectory

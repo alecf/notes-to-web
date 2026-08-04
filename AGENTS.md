@@ -111,11 +111,15 @@ verbatim to `VTCompressionSessionSetProperty`) and does enforce, but it lands
 third of the budget if used as the primary mechanism. It is used only on the
 rare corrective second pass, where certainty beats sharpness.
 
-**CI runners cannot hardware-encode video.** The encoding suites hang
-indefinitely there, not fail — a 40-minute stuck job with no output. They are
-gated on `VideoTranscoder.supportsHardwareEncoding` and carry a time limit so a
-pathological runner fails fast instead of stalling the build. Encoding changes
-must be verified locally; CI will not catch them.
+**CI runners advertise a hardware video encoder but block forever when one is
+used.** `VTCopyVideoEncoderList` lists it, so detection alone does not save you,
+and the job hangs with no output rather than failing — no timeout inside the
+test can rescue a blocked VideoToolbox call. The encoding suites are gated on
+`VideoTranscoder.canRunEncodingTests`, which additionally requires `CI` to be
+unset. **Encoding changes are verified on real hardware only; CI will not catch
+them.** Run `swift test` locally before shipping any transcoder change, and
+`NOTES_TO_WEB_SCALE=1 NOTES_TO_WEB_SAMPLE=/path/to.mov swift test --filter Scale`
+against real footage — synthetic fixtures did not catch the size-budget bug.
 
 **`URL.resourceValues` caches per URL instance.** Re-reading a file's size
 through the same `URL` after rewriting it returns the *old* size, which makes

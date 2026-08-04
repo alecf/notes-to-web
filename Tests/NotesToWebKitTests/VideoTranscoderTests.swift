@@ -6,7 +6,7 @@ import Testing
 
 /// Everything here runs against video synthesised on the fly — no Notes library,
 /// no personal media, nothing left behind in the temp directory.
-@Suite("Video transcoder", .enabled(if: VideoTranscoder.supportsHardwareEncoding, "no hardware video encoder on this machine"), .timeLimit(.minutes(5)))
+@Suite("Video transcoder", .enabled(if: VideoTranscoder.canRunEncodingTests, "no usable hardware video encoder here"), .timeLimit(.minutes(5)))
 struct VideoTranscoderTests {
 
     // MARK: Planning
